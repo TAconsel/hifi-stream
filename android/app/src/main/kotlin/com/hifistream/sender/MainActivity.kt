@@ -28,6 +28,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -321,6 +322,14 @@ fun MainScreen() {
                     if (privileged) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
+                                Text("Quick Settings tile")
+                                Text("Start and stop streaming from the notification shade; the status-bar icon shows the Wi-Fi signal while streaming",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            TextButton(onClick = { requestQuickSettingsTile(ctx) }) { Text("Add tile") }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
                                 Text("Forward phone volume to PC")
                                 Text("Volume keys set the receiver's volume while streaming (kept apart from the speaker volume, which comes back when you stop); audio is sent at full scale",
                                     style = MaterialTheme.typography.bodySmall)
@@ -455,5 +464,22 @@ fun StatusCard() {
                 }
             }
         }
+    }
+}
+
+/** Asks the system to add our Quick Settings tile (Android 13+); earlier versions get a hint. */
+private fun requestQuickSettingsTile(ctx: android.content.Context) {
+    if (android.os.Build.VERSION.SDK_INT >= 33) {
+        val sbm = ctx.getSystemService(android.app.StatusBarManager::class.java)
+        sbm.requestAddTileService(
+            android.content.ComponentName(ctx, StreamTileService::class.java),
+            ctx.getString(R.string.app_name),
+            android.graphics.drawable.Icon.createWithResource(ctx, R.drawable.ic_stat_stream),
+            { it.run() }, { }
+        )
+    } else {
+        android.widget.Toast.makeText(ctx,
+            "Open Quick Settings, tap the edit (pencil) button and drag the HiFi Stream tile in",
+            android.widget.Toast.LENGTH_LONG).show()
     }
 }

@@ -70,6 +70,11 @@ writes exactly what arrives, which is how the numbers below were verified.
 
 ## Android app
 
+* In system mode a **Quick Settings tile** starts and stops streaming from the
+  notification shade with the saved settings ("Add tile" in the app, or the
+  shade's edit button), and the status-bar icon on the left shows the Wi-Fi
+  signal as bars while streaming.
+
 Build with Android Studio, or from the command line (needs a JDK 17+ and the
 Android SDK; `android/local.properties` points at both):
 

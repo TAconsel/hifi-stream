@@ -18,6 +18,7 @@ import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -59,6 +60,17 @@ class CaptureService : Service() {
         private const val CHANNELS = 2
 
         fun stopIntent(context: Context) = Intent(context, CaptureService::class.java).setAction(ACTION_STOP)
+
+        /** Start intent for system mode from the saved settings (no consent dialog is needed there). */
+        fun systemStartIntent(context: Context, settings: Settings) = Intent(context, CaptureService::class.java)
+            .setAction(ACTION_START)
+            .putExtra(EXTRA_SYSTEM, true)
+            .putExtra(EXTRA_FORWARD_VOLUME, settings.forwardVolume)
+            .putExtra(EXTRA_HOST, settings.host)
+            .putExtra(EXTRA_PORT, settings.port)
+            .putExtra(EXTRA_RATE, settings.rate)
+            .putExtra(EXTRA_FORMAT, settings.format.id)
+            .putExtra(EXTRA_MUTE, settings.mutePhone)
 
         /** Restores a media volume left muted by an earlier, killed session, if any. */
         fun restoreSavedVolume(context: Context) {
@@ -229,7 +241,10 @@ class CaptureService : Service() {
         StreamState.phoneVolume = phoneVolume
         val modeLabel = if (system) "System" else "Streaming"
         StreamState.status = "$modeLabel ${rate / 1000.0} kHz ${format.label}"
-        notify("Streaming to $host · ${rate / 1000.0} kHz ${format.label}" + if (system) " · system mode" else "")
+        notifyText = "Streaming to $host · ${rate / 1000.0} kHz ${format.label}" + if (system) " · system mode" else ""
+        signalLevel = readSignalLevel()
+        notify(notifyText)
+        StreamTileService.requestUpdate(this)
 
         worker = Thread({ streamLoop(rec, host, port, rate, format) }, "hfs-capture").also { it.start() }
     }
@@ -376,6 +391,7 @@ class CaptureService : Service() {
                     val lp = clock.latePackets
                     val rs = history.resent
                     mainHandler.post {
+                        updateSignalIcon()
                         StreamState.resent = rs
                         StreamState.packets = p
                         StreamState.kbps = kbps
@@ -535,6 +551,7 @@ class CaptureService : Service() {
         StreamState.running = false
         StreamState.status = reason
         StreamState.kbps = 0.0
+        StreamTileService.requestUpdate(this)
     }
 
     private fun fail(message: String) {
@@ -595,6 +612,47 @@ class CaptureService : Service() {
         )
     }
 
+    // ---- status-bar signal icon ------------------------------------------------
+
+    private var notifyText = ""
+    @Volatile private var signalLevel = 4          // 0..4 bars, from the Wi-Fi link
+
+    /** Wi-Fi signal level as 0..4 bars, like the system's own icon. */
+    private fun readSignalLevel(): Int {
+        return try {
+            val wifi = applicationContext.getSystemService(WifiManager::class.java)
+            @Suppress("DEPRECATION")
+            val rssi = wifi.connectionInfo.rssi
+            if (Build.VERSION.SDK_INT >= 30) {
+                val max = wifi.maxSignalLevel
+                if (max > 0) wifi.calculateSignalLevel(rssi) * 4 / max else 4
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.calculateSignalLevel(rssi, 5)
+            }
+        } catch (_: Exception) {
+            4
+        }.coerceIn(0, 4)
+    }
+
+    /** Called from the stats loop: refreshes the notification icon when the bars change. */
+    private fun updateSignalIcon() {
+        if (!running) return
+        val level = readSignalLevel()
+        if (level != signalLevel) {
+            signalLevel = level
+            notify(notifyText)
+        }
+    }
+
+    private fun signalIcon() = when (signalLevel) {
+        0 -> R.drawable.ic_signal_0
+        1 -> R.drawable.ic_signal_1
+        2 -> R.drawable.ic_signal_2
+        3 -> R.drawable.ic_signal_3
+        else -> R.drawable.ic_signal_4
+    }
+
     private fun buildNotification(text: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -605,7 +663,7 @@ class CaptureService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_stream)
+            .setSmallIcon(if (running) signalIcon() else R.drawable.ic_stat_stream)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setContentIntent(open)
