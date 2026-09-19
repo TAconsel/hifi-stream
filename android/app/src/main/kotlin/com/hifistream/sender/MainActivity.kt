@@ -108,11 +108,13 @@ fun MainScreen() {
     var rootBusy by remember { mutableStateOf(false) }
     var rootMessage by remember { mutableStateOf<String?>(null) }
     var needsReboot by remember { mutableStateOf(false) }
+    var halPatched by remember { mutableStateOf<Boolean?>(null) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val r = RootInstaller.hasRoot()
             val m = if (r) RootInstaller.isModuleInstalled() else false
-            hasRoot = r; moduleInstalled = m
+            val h = if (m) HalPatcher.isInstalled() else false
+            hasRoot = r; moduleInstalled = m; halPatched = h
         }
     }
 
@@ -256,7 +258,9 @@ fun MainScreen() {
                             ) { Text(if (r % 1000 == 0) "${r / 1000} kHz" else "${r / 1000.0} kHz") }
                         }
                     }
-                    Text("Android's playback capture is 16-bit / 48 kHz on most phones; 96 kHz is upsampled by Android.",
+                    Text(
+                        if (halPatched == true) "Patched HAL: the capture pipe follows this rate in 32-bit float."
+                        else "Android's playback capture is 16-bit / 48 kHz on most phones; 96 kHz is upsampled by Android.",
                         style = MaterialTheme.typography.bodySmall)
                     Text("Bit depth", style = MaterialTheme.typography.labelMedium)
                     val formats = StreamProtocol.Format.entries
@@ -352,6 +356,40 @@ fun MainScreen() {
                             }
                             if (needsReboot) Button(onClick = { scope.launch { withContext(Dispatchers.IO) { RootInstaller.reboot() } } }) { Text("Reboot now") }
                             if (rootBusy) CircularProgressIndicator(Modifier.width(20.dp).height(20.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                    if (privileged && hasRoot == true && moduleInstalled == true) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Hi-res capture", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                if (halPatched == true) "Remote-submix HAL patched: the loop-back pipe runs in 32-bit float at the selected sample rate (44.1 / 48 / 96 kHz)."
+                                else "Android's remote-submix HAL forces the loop-back pipe to 16-bit / 48 kHz. The patch changes two constants in a copy of that library (float instead of 16-bit, keep the requested rate); the copy lives in the Magisk module, the original is untouched.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (halPatched != true) {
+                                    Button(enabled = !rootBusy && !StreamState.running, onClick = {
+                                        rootBusy = true; rootMessage = null
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) { HalPatcher.install(ctx.cacheDir) }
+                                            rootBusy = false
+                                            rootMessage = if (r.ok) "HAL patched (${r.message}). Reboot to activate." else "Patch not applied: ${r.message}"
+                                            if (r.ok) { needsReboot = true; halPatched = true }
+                                        }
+                                    }) { Text("Patch HAL for 24-bit / 96 kHz") }
+                                } else {
+                                    OutlinedButton(enabled = !rootBusy && !StreamState.running, onClick = {
+                                        rootBusy = true; rootMessage = null
+                                        scope.launch {
+                                            val r = withContext(Dispatchers.IO) { HalPatcher.uninstall() }
+                                            rootBusy = false
+                                            rootMessage = r.message
+                                            if (r.ok) { needsReboot = true; halPatched = false }
+                                        }
+                                    }) { Text("Restore stock HAL") }
+                                }
+                                if (needsReboot) Button(onClick = { scope.launch { withContext(Dispatchers.IO) { RootInstaller.reboot() } } }) { Text("Reboot now") }
+                            }
                         }
                     }
                     rootMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
