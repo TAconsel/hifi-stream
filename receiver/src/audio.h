@@ -29,6 +29,7 @@ struct audio_stats {
     int quantum;            /* frames per PipeWire process cycle */
     int graph_rate;         /* PipeWire graph rate; equals cfg.rate when bit-exact */
     double device_delay_ms; /* delay reported by PipeWire between the stream and the DAC */
+    double rate_corr;       /* resampler rate correction, 1.0 = none; see audio.c */
     uint64_t underruns;
     uint64_t overflows;
     uint64_t drops;         /* crossfaded frame drops (buffer running long) */

@@ -54,6 +54,19 @@ The phone broadcasts the ASCII text `HFS_DISCOVER` to `255.255.255.255:47100`
 (and to the subnet's directed broadcast). Every receiver answers directly to
 the sender's address with `HFS_HERE <hostname>`.
 
+## Receiver report
+
+Once a second while a session is active the receiver sends, to the address the
+audio comes from:
+
+```
+HFS_RX <jitter_ms> <lost> <recovered> <underruns> <buffer_ms>
+```
+
+`lost`, `recovered` and `underruns` are session totals. The phone uses the
+deltas between reports for its status-bar link indicator, and treats a missing
+report (none for 3 s) as "receiver not playing".
+
 ## Control
 
 `HFS_BYE` sent by the phone when streaming stops; the receiver flushes its

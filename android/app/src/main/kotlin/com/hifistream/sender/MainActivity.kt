@@ -323,7 +323,7 @@ fun MainScreen() {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("Quick Settings tile")
-                                Text("Start and stop streaming from the notification shade; the status-bar icon shows the Wi-Fi signal while streaming",
+                                Text("Start and stop streaming from the notification shade; the status-bar icon shows the link quality the receiver reports",
                                     style = MaterialTheme.typography.bodySmall)
                             }
                             TextButton(onClick = { requestQuickSettingsTile(ctx) }) { Text("Add tile") }
@@ -448,6 +448,10 @@ fun StatusCard() {
                         StreamState.capturePeriodMs, StreamState.captureLatencyMs, StreamState.paceMs) +
                         (if (StreamState.latePackets > 0) " · ${StreamState.latePackets} late" else "") +
                         (if (StreamState.resent > 0) " · ${StreamState.resent} resent" else ""),
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                if (StreamState.linkSummary.isNotEmpty()) {
+                    Text("Link ${"▮".repeat(StreamState.linkBars)}${"▯".repeat(4 - StreamState.linkBars)} · ${StreamState.linkSummary}",
                         style = MaterialTheme.typography.bodySmall)
                 }
                 if (StreamState.systemMode) {

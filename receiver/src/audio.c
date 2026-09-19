@@ -6,6 +6,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
 #include <spa/param/props.h>
+#include <spa/utils/dll.h>
 
 #include <math.h>
 #include <stdatomic.h>
@@ -21,6 +22,9 @@
 #define PREBUFFER_EXTRA_MS 20.0  /* headroom above the margin when starting */
 #define MIN_WINDOW_SECONDS 5.0   /* bucket of the minimum-fill tracker (memory 5-10 s) */
 #define ADJUST_GAP_FRAMES (XFADE_MAX * 200) /* frames between corrections: <= 0.5 % speed change */
+#define SPLICE_MS         20.0   /* fill error beyond this is spliced; below it the resampler rate absorbs it */
+#define RATE_MAX_ERR_MS   20.0   /* error fed to the rate DLL is clamped to this */
+#define RATE_CORR_MAX     0.005  /* +-0.5 % resampler rate */
 
 struct audio {
     struct audio_options opts;
@@ -57,6 +61,11 @@ struct audio {
     int64_t win_frames;
     int64_t underrun_run;       /* frames of continuous silence emitted */
     int64_t since_adjust;       /* frames rendered since the last drop/insert */
+    struct spa_dll dll;         /* steers the resampler rate on the fill error */
+    double  rate_corr;
+    _Atomic uint64_t rate_corr_bits;
+    struct spa_source *rate_timer;
+    double  rate_applied;
     float  *scratch;            /* quantum + XFADE_MAX frames */
     size_t  scratch_frames;
 };
@@ -64,6 +73,7 @@ struct audio {
 static struct audio A;
 
 static void apply_volume_locked(void);
+static void on_rate_timer(void *data, uint64_t expirations);
 
 static inline uint64_t ring_fill(void)
 {
@@ -285,10 +295,40 @@ static void render(float *dst, int n)
     int tol = 2 * k;
     if (tol < rate / 250) tol = rate / 250;       /* deadband of >= 4 ms around the margin */
 
-    /* Corrections are rate-limited so trimming a cushion left by a network
-     * hole is a 0.5 % tempo change over seconds, not a 20 % one over 300 ms. */
+    /* Fine regulation: the fill error steers PipeWire's resampler rate through
+     * a DLL (the same mechanism its RTP receiver uses), so clock drift between
+     * phone and DAC and small timing changes are absorbed by playing a few
+     * hundred ppm faster or slower with no splice at all. rate > 1 consumes
+     * the stream faster, i.e. shrinks the buffer. */
+    {
+        /* The DLL wants a low-lag signal, so it is fed the instantaneous fill
+         * against a target raised by the measured ripple (average minus
+         * windowed minimum): the minimum then settles at the margin, while the
+         * loop itself never waits on the slow minimum tracker. */
+        double ripple = A.ema_fill - (double)mfill;
+        if (ripple < 0) ripple = 0;
+        double err = ((double)target + ripple - (double)fill) * 1000.0 / rate;   /* ms, > 0 = too short */
+        if (err > RATE_MAX_ERR_MS) err = RATE_MAX_ERR_MS;
+        if (err < -RATE_MAX_ERR_MS) err = -RATE_MAX_ERR_MS;
+        if (A.dll.bw == 0.0)
+            spa_dll_set_bw(&A.dll, SPA_DLL_BW_MIN, (unsigned)n, (unsigned)rate);
+        double corr = spa_dll_update(&A.dll, err * rate / 1000.0);
+        if (corr > 1.0 + RATE_CORR_MAX) corr = 1.0 + RATE_CORR_MAX;
+        if (corr < 1.0 - RATE_CORR_MAX) corr = 1.0 - RATE_CORR_MAX;
+        if (fabs(corr - A.rate_corr) > 1e-6) {
+            /* Applied by the loop timer: controls cannot be set from the RT thread. */
+            A.rate_corr = corr;
+            uint64_t bits; memcpy(&bits, &corr, sizeof(bits));
+            atomic_store(&A.rate_corr_bits, bits);
+        }
+    }
+
+    /* Coarse corrections (crossfaded splices) only for errors the resampler
+     * would take too long to work off, rate-limited to a 0.5 % tempo change. */
     A.since_adjust += n;
     int may_adjust = A.since_adjust >= ADJUST_GAP_FRAMES;
+    int64_t splice = (int64_t)(SPLICE_MS * 1e-3 * rate);
+    if (tol < splice) tol = splice;
 
     if (may_adjust && k >= 4 && mfill > target + tol && fill >= n + k) {
         /* Buffer runs long: read n+k, crossfade the tail into the skipped part. */
@@ -443,6 +483,9 @@ int audio_configure(const struct audio_config *cfg)
     atomic_store(&A.drops, 0);     atomic_store(&A.inserts, 0);
     atomic_store(&A.resyncs, 0);
     A.since_adjust = 0;
+    spa_dll_init(&A.dll);
+    A.rate_corr = 1.0;
+    { double one = 1.0; uint64_t bits; memcpy(&bits, &one, sizeof(bits)); atomic_store(&A.rate_corr_bits, bits); }
     A.ema_fill = 0;
     A.underrun_run = 0;
 
@@ -468,6 +511,12 @@ int audio_configure(const struct audio_config *cfg)
         pw_thread_loop_unlock(A.loop);
         return -1;
     }
+    A.rate_applied = 1.0;
+    if (!A.rate_timer) {
+        A.rate_timer = pw_loop_add_timer(pw_thread_loop_get_loop(A.loop), on_rate_timer, NULL);
+        struct timespec t0 = { .tv_sec = 0, .tv_nsec = 50 * 1000000L }, iv = t0;
+        pw_loop_update_timer(pw_thread_loop_get_loop(A.loop), A.rate_timer, &t0, &iv, false);
+    }
 
     uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -491,6 +540,22 @@ int audio_configure(const struct audio_config *cfg)
     }
     pw_thread_loop_unlock(A.loop);
     return 0;
+}
+
+/* Runs in the PipeWire loop every 50 ms: hands the RT thread's rate
+ * correction to the stream's resampler. */
+static void on_rate_timer(void *data, uint64_t expirations)
+{
+    (void)data; (void)expirations;
+    if (!A.stream)
+        return;
+    uint64_t bits = atomic_load(&A.rate_corr_bits);
+    double corr; memcpy(&corr, &bits, sizeof(corr));
+    if (!bits || fabs(corr - A.rate_applied) < 1e-7)
+        return;
+    float f = (float)corr;
+    if (pw_stream_set_control(A.stream, SPA_PROP_rate, 1, &f, 0) == 0)
+        A.rate_applied = corr;
 }
 
 static void apply_volume_locked(void)
@@ -540,6 +605,7 @@ void audio_get_stats(struct audio_stats *s)
     s->underruns = atomic_load(&A.underruns);
     s->overflows = atomic_load(&A.overflows);
     s->drops = atomic_load(&A.drops);
+    { uint64_t bits = atomic_load(&A.rate_corr_bits); double v; memcpy(&v, &bits, sizeof(v)); s->rate_corr = bits ? v : 1.0; }
     s->inserts = atomic_load(&A.inserts);
     s->resyncs = atomic_load(&A.resyncs);
     s->phone_volume = A.phone_volume;

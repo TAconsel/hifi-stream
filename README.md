@@ -58,9 +58,11 @@ writes exactly what arrives, which is how the numbers below were verified.
   5–10 s instead of trimming straight back to the margin, so a hole that
   repeats every few seconds only costs one dropout, not one per repeat. The
   default margin is 20 ms; on a congested AP with 50–100 ms holes raise it.
-* Clock drift between phone and DAC is absorbed with 64-frame crossfaded
-  drops/inserts (WSOLA-style, no pitch change, no clicks); when the buffer is
-  in tolerance the samples pass through untouched.
+* Clock drift between phone and DAC, and any drift in the arrival timing, is
+  absorbed by steering PipeWire's resampler rate a few hundred ppm through a
+  DLL (the mechanism PipeWire's own RTP receiver uses), so in steady state
+  nothing is ever spliced. 64-frame crossfaded drops/inserts remain only for
+  gross errors (> 20 ms), rate-limited to a 0.5 % tempo change.
 * Lost packets become silence of the right length so timing is preserved, and
   are requested again from the phone at once (NACK, see PROTOCOL.md); a resend
   that lands before the spot is played replaces the silence. With 2 % random
@@ -72,8 +74,10 @@ writes exactly what arrives, which is how the numbers below were verified.
 
 * In system mode a **Quick Settings tile** starts and stops streaming from the
   notification shade with the saved settings ("Add tile" in the app, or the
-  shade's edit button), and the status-bar icon on the left shows the Wi-Fi
-  signal as bars while streaming.
+  shade's edit button), and the status-bar icon on the left shows the link
+  quality as bars while streaming — from the receiver's own once-a-second
+  report (dropouts, losses, resends, jitter), not from Wi-Fi signal strength,
+  so 0 bars means the PC is not playing what is sent.
 
 Build with Android Studio, or from the command line (needs a JDK 17+ and the
 Android SDK; `android/local.properties` points at both):

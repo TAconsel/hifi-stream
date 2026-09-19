@@ -15,6 +15,7 @@
 #define HFS_VOLUME_MSG   "HFS_VOL"   /* "HFS_VOL 0.63": phone media volume, fraction of max */
 #define HFS_NACK_MSG     "HFS_NACK"  /* followed by uint16 LE sequence numbers to resend */
 #define HFS_NACK_MAX     64          /* sequence numbers per NACK message */
+#define HFS_REPORT_MSG   "HFS_RX"    /* receiver → sender health report, once a second, see PROTOCOL.md */
 
 enum hfs_format {
     HFS_FMT_S16LE = 1,

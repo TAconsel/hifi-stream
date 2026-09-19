@@ -21,6 +21,8 @@ object StreamState {
     var paceMs by mutableStateOf(0.0)             // delay added to smooth packets out
     var latePackets by mutableStateOf(0L)         // sent > 4 ms after they were due
     var resent by mutableStateOf(0L)              // packets resent on the receiver's request
+    var linkBars by mutableStateOf(0)             // receiver-reported link quality, 0..4
+    var linkSummary by mutableStateOf("")         // the receiver's last report, human readable
     var host by mutableStateOf("")
     var rate by mutableStateOf(0)
     var systemMode by mutableStateOf(false)

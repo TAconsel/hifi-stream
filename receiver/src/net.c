@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
@@ -48,6 +49,7 @@ struct net {
     uint16_t next_seq;
     uint64_t last_rx_ns;
     uint64_t session_start_ns;
+    uint64_t last_report_ns;
     /* bitrate window */
     uint64_t win_start_ns, win_bytes;
     /* jitter */
@@ -270,6 +272,7 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.session_start_ns = rx_ns;
         N.st.packets = N.st.bytes = N.st.lost = N.st.late = 0;
         N.st.nacks = N.st.recovered = 0;
+        N.last_report_ns = rx_ns;
         pending_clear_locked();
         N.win_start_ns = rx_ns; N.win_bytes = 0;
         N.st.phone_volume = -1;
@@ -363,6 +366,16 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.st.dump_frames = N.dump_frames;
     }
     pending_tick_locked(rx_ns);
+    if (rx_ns - N.last_report_ns >= 1000000000ULL) {
+        N.last_report_ns = rx_ns;
+        struct audio_stats a;
+        audio_get_stats(&a);
+        char msg[128];
+        int m = snprintf(msg, sizeof(msg), "%s %.2f %" PRIu64 " %" PRIu64 " %" PRIu64 " %.1f", HFS_REPORT_MSG,
+                         N.st.jitter_ms, N.st.lost, N.st.recovered, a.underruns,
+                         a.cfg.rate ? 1000.0 * a.fill_frames / a.cfg.rate : 0.0);
+        sendto(N.sock, msg, (size_t)m, MSG_DONTWAIT, (const struct sockaddr *)&N.peer, sizeof(N.peer));
+    }
     pthread_mutex_unlock(&N.lock);
 
     audio_push(samples, (int)h.frames);

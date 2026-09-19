@@ -208,10 +208,10 @@ static gboolean refresh(gpointer data)
 
     if (a.state != AUDIO_IDLE && a.cfg.rate) {
         double q_ms = a.quantum ? 1000.0 * a.quantum / a.cfg.rate : 0;
-        snprintf(buf, sizeof(buf), "PipeWire %s · graph %d Hz%s · quantum %d (%.1f ms) · device delay %.1f ms",
+        snprintf(buf, sizeof(buf), "PipeWire %s · graph %d Hz%s · quantum %d (%.1f ms) · device delay %.1f ms · rate ×%.5f (%+.0f ppm)",
                  state_name(a.state), a.graph_rate,
-                 a.graph_rate && a.graph_rate != a.cfg.rate ? " (resampling!)" : " (bit-exact)",
-                 a.quantum, q_ms, a.device_delay_ms);
+                 a.graph_rate && a.graph_rate != a.cfg.rate ? " (resampling!)" : "",
+                 a.quantum, q_ms, a.device_delay_ms, a.rate_corr, (a.rate_corr - 1.0) * 1e6);
         gtk_label_set_text(GTK_LABEL(UI.output), buf);
         double pkt_ms = n.cfg.rate ? 1000.0 * n.frames_per_packet / n.cfg.rate : 0;
         snprintf(buf, sizeof(buf), "≈ %.0f ms on this PC (buffer + device) + %.0f ms packetisation + Wi-Fi + phone capture & pacing (~25 ms)",
@@ -420,10 +420,10 @@ static gboolean headless_tick(gpointer data)
         double min_ms = a.cfg.rate ? 1000.0 * a.min_fill_frames / a.cfg.rate : 0;
         printf("%s %d Hz %s | %s | pkts %" G_GUINT64_FORMAT " lost %" G_GUINT64_FORMAT " recovered %" G_GUINT64_FORMAT " late %" G_GUINT64_FORMAT
                " | %.0f kbit/s jit %.2f ms | buf avg %.1f min %.1f ms | drop %" G_GUINT64_FORMAT " ins %" G_GUINT64_FORMAT
-               " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT " | dev %.1f ms | peak %.1f/%.1f dB | vol %.0f%%\n",
+               " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT " | rate %+.0f ppm | dev %.1f ms | peak %.1f/%.1f dB | vol %.0f%%\n",
                n.sender, n.cfg.rate, hfs_format_name(n.cfg.format), state_name(a.state),
                n.packets, n.lost, n.recovered, n.late, n.bitrate_kbps, n.jitter_ms, fill_ms, min_ms,
-               a.drops, a.inserts, a.resyncs, a.underruns, a.device_delay_ms,
+               a.drops, a.inserts, a.resyncs, a.underruns, (a.rate_corr - 1.0) * 1e6, a.device_delay_ms,
                to_db(a.peak[0]), to_db(a.peak[1]), n.phone_volume >= 0 ? n.phone_volume * 100 : 100.0);
     }
     fflush(stdout);

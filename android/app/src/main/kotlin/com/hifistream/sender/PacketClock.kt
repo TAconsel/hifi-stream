@@ -34,16 +34,16 @@ class PacketClock(private val rate: Int) {
         private const val TAG = "HiFiStream"
         private const val US = 1_000_000.0
         private const val PACE_MARGIN_US = 2_000L           // headroom above the latency envelope
-        private const val PACE_DECAY_PER_S_US = 500L        // how fast the envelope may shrink
+        private const val PACE_DECAY_PER_S_US = 200L        // how fast the envelope may shrink
         private const val BLOCKED_US = 1_000L               // a read that took longer really waited for the HAL
         private const val REANCHOR_US = 250_000L            // capture stall: rebuild the clock
         private const val LATENCY_MAX_US = 100_000L         // a later delivery is a stall, not jitter to pace for
         private const val LOCK_WINDOW_US = 1_000_000L       // minimum slack is evaluated once per window
         private const val LOCK_TARGET_US = 500L             // where the minimum slack should sit
         private const val ANCHOR_HEADROOM_US = LOCK_TARGET_US // a fresh anchor starts at the target, no step to integrate
-        private const val KP = 0.3                          // fraction of the error removed per second
-        private const val KI = 0.05                         // integral gain, per second²
-        private const val SLEW_MAX_US_PER_S = 10_000L       // ≈ 1 % rate change at most
+        private const val KP = 0.2                          // fraction of the error removed per second
+        private const val KI = 0.02                         // integral gain, per second²
+        private const val SLEW_MAX_US_PER_S = 3_000L        // ≈ 0.3 % rate change at most: enough for any real drift, gentle on the receiver
         private const val LATE_LOG_US = 4_000L              // a packet this late is worth a log line
         private const val LOG_INTERVAL_US = 1_000_000L
     }

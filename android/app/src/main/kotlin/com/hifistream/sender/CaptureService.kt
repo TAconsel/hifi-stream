@@ -242,6 +242,7 @@ class CaptureService : Service() {
         val modeLabel = if (system) "System" else "Streaming"
         StreamState.status = "$modeLabel ${rate / 1000.0} kHz ${format.label}"
         notifyText = "Streaming to $host · ${rate / 1000.0} kHz ${format.label}" + if (system) " · system mode" else ""
+        LinkHealth.reset()
         signalLevel = readSignalLevel()
         notify(notifyText)
         StreamTileService.requestUpdate(this)
@@ -462,6 +463,7 @@ class CaptureService : Service() {
     private fun nackLoop(socket: DatagramSocket, history: PacketHistory, address: InetAddress, port: Int) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val nack = StreamProtocol.NACK.toByteArray()
+        val report = StreamProtocol.REPORT.toByteArray()
         val rx = ByteArray(512)
         val rxPacket = DatagramPacket(rx, rx.size)
         val resend = DatagramPacket(ByteArray(0), 0, address, port)
@@ -474,6 +476,10 @@ class CaptureService : Service() {
                 continue
             }
             val n = rxPacket.length
+            if (n >= report.size && rx.copyOfRange(0, report.size).contentEquals(report)) {
+                LinkHealth.onReport(String(rx, 0, n, Charsets.US_ASCII))
+                continue
+            }
             if (n < nack.size + 2 || !rx.copyOfRange(0, nack.size).contentEquals(nack)) continue
             var i = nack.size
             while (i + 1 < n) {
@@ -656,30 +662,17 @@ class CaptureService : Service() {
     // ---- status-bar signal icon ------------------------------------------------
 
     private var notifyText = ""
-    @Volatile private var signalLevel = 4          // 0..4 bars, from the Wi-Fi link
+    @Volatile private var signalLevel = 0          // 0..4 bars, from the receiver's health reports
 
-    /** Wi-Fi signal level as 0..4 bars, like the system's own icon. */
-    private fun readSignalLevel(): Int {
-        return try {
-            val wifi = applicationContext.getSystemService(WifiManager::class.java)
-            @Suppress("DEPRECATION")
-            val rssi = wifi.connectionInfo.rssi
-            if (Build.VERSION.SDK_INT >= 30) {
-                val max = wifi.maxSignalLevel
-                if (max > 0) wifi.calculateSignalLevel(rssi) * 4 / max else 4
-            } else {
-                @Suppress("DEPRECATION")
-                WifiManager.calculateSignalLevel(rssi, 5)
-            }
-        } catch (_: Exception) {
-            4
-        }.coerceIn(0, 4)
-    }
+    /** Link quality as 0..4 bars from what the receiver reports (see LinkHealth), not Wi-Fi RSSI. */
+    private fun readSignalLevel(): Int = LinkHealth.bars()
 
     /** Called from the stats loop: refreshes the notification icon when the bars change. */
     private fun updateSignalIcon() {
         if (!running) return
         val level = readSignalLevel()
+        StreamState.linkBars = level
+        StreamState.linkSummary = LinkHealth.summary()
         if (level != signalLevel) {
             signalLevel = level
             notify(notifyText)
