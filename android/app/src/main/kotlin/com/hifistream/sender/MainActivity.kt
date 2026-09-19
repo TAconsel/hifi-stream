@@ -322,7 +322,7 @@ fun MainScreen() {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("Forward phone volume to PC")
-                                Text("Volume keys set the receiver's volume; audio is sent at full scale",
+                                Text("Volume keys set the receiver's volume while streaming (kept apart from the speaker volume, which comes back when you stop); audio is sent at full scale",
                                     style = MaterialTheme.typography.bodySmall)
                             }
                             Switch(checked = forwardVolume, onCheckedChange = { forwardVolume = it }, enabled = !StreamState.running)

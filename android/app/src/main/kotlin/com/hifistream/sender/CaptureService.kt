@@ -243,6 +243,19 @@ class CaptureService : Service() {
     }
 
     private fun startVolumeForwarding() {
+        // While forwarding, the media volume *is* the streaming volume, so it is kept
+        // apart from the speaker volume: the speaker level is saved now and restored
+        // when streaming stops, and the keys start from where they were last time.
+        val am = getSystemService(AudioManager::class.java)
+        val settings = Settings(this)
+        try {
+            val current = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            savedVolume = if (settings.savedVolume >= 0) settings.savedVolume else current
+            settings.savedVolume = savedVolume
+            val sv = settings.streamVolume
+            if (sv >= 0 && sv != current) am.setStreamVolume(AudioManager.STREAM_MUSIC, sv, 0)
+        } catch (_: Exception) {
+        }
         phoneVolume = readPhoneVolume()
         volumeDirty = true
         val r = object : BroadcastReceiver() {
@@ -251,6 +264,10 @@ class CaptureService : Service() {
                 phoneVolume = readPhoneVolume()
                 volumeDirty = true
                 StreamState.phoneVolume = phoneVolume
+                try {
+                    settings.streamVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                } catch (_: Exception) {
+                }
             }
         }
         registerReceiver(r, IntentFilter(VOLUME_CHANGED_ACTION))

@@ -47,10 +47,15 @@ class Settings(context: Context) {
         get() = StreamProtocol.Format.fromId(prefs.getInt("format", StreamProtocol.Format.S24.id))
         set(v) = prefs.edit().putInt("format", v.id).apply()
 
-    /** Media volume saved before muting; -1 when nothing is pending. */
+    /** Phone media volume saved while streaming (muted or forwarded); -1 when nothing is pending. */
     var savedVolume: Int
         get() = prefs.getInt("savedVolume", -1)
         set(v) = prefs.edit().putInt("savedVolume", v).apply()
+
+    /** The streaming volume (media-volume index) the volume keys last set while forwarding; -1 = none yet. */
+    var streamVolume: Int
+        get() = prefs.getInt("streamVolume", -1)
+        set(v) = prefs.edit().putInt("streamVolume", v).apply()
 
     var systemMode: Boolean
         get() = prefs.getBoolean("systemMode", false)
