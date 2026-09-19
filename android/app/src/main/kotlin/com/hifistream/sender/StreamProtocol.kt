@@ -13,6 +13,8 @@ object StreamProtocol {
     const val HERE = "HFS_HERE"
     const val BYE = "HFS_BYE"
     const val VOLUME = "HFS_VOL"          // "HFS_VOL 0.63": phone media volume as a fraction 0..1
+    const val NACK = "HFS_NACK"           // followed by uint16 LE sequence numbers the receiver wants again
+    const val HISTORY = 256               // packets kept for retransmission (≈ 0.5-1.3 s)
 
     enum class Format(val id: Int, val bytesPerSample: Int, val label: String) {
         S16(1, 2, "16-bit"),

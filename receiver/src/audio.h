@@ -55,6 +55,11 @@ void audio_close(void);
 /* Producer side (network thread). Samples are interleaved float. */
 void audio_push(const float *samples, int frames);
 void audio_push_silence(int frames);
+/* Stream position (frames) the next push will land at. */
+uint64_t audio_write_pos(void);
+/* Overwrites frames at a stream position that has been pushed but not yet
+ * played, e.g. a retransmitted packet replacing its silence. False if too late. */
+bool audio_patch(uint64_t at, const float *samples, int frames);
 /* Drops everything buffered and re-enters prebuffering. */
 void audio_flush(void);
 

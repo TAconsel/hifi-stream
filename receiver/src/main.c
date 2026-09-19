@@ -17,11 +17,11 @@ static struct {
     gboolean force_rate;
     char    *dump;
     char    *target;
-} opt = { .port = HFS_DEFAULT_PORT, .buffer_ms = 10.0, .quantum = 256 };
+} opt = { .port = HFS_DEFAULT_PORT, .buffer_ms = 20.0, .quantum = 256 };
 
 static const GOptionEntry entries[] = {
     { "port",       'p', 0, G_OPTION_ARG_INT,    &opt.port,       "UDP port to listen on (default 47100)", "PORT" },
-    { "buffer",     'b', 0, G_OPTION_ARG_DOUBLE, &opt.buffer_ms,  "Jitter buffer safety margin in ms (default 10)", "MS" },
+    { "buffer",     'b', 0, G_OPTION_ARG_DOUBLE, &opt.buffer_ms,  "Jitter buffer safety margin in ms (default 20)", "MS" },
     { "quantum",    'q', 0, G_OPTION_ARG_INT,    &opt.quantum,    "Requested PipeWire quantum in frames (default 256)", "FRAMES" },
     { "target",     't', 0, G_OPTION_ARG_STRING, &opt.target,     "PipeWire sink to play to (node name or id)", "NODE" },
     { "force-rate", 0,   0, G_OPTION_ARG_NONE,   &opt.force_rate, "Force the PipeWire graph rate to follow the stream", NULL },
@@ -144,6 +144,21 @@ static gboolean refresh(gpointer data)
     audio_get_stats(&a);
     char buf[256];
 
+    /* Event log on stderr, so a dropout can be matched to a cause afterwards. */
+    static guint64 last_under, last_resync, last_lost;
+    if (a.underruns != last_under || a.resyncs != last_resync || n.lost != last_lost) {
+        GDateTime *t = g_date_time_new_now_local();
+        gchar *ts = g_date_time_format(t, "%H:%M:%S");
+        fprintf(stderr, "%s underruns %" G_GUINT64_FORMAT " (+%" G_GUINT64_FORMAT ") resyncs %" G_GUINT64_FORMAT
+                " lost %" G_GUINT64_FORMAT " · buffer now %.1f ms min %.1f ms · net jitter %.2f ms\n",
+                ts, a.underruns, a.underruns - last_under, a.resyncs, n.lost,
+                a.cfg.rate ? 1000.0 * a.fill_frames / a.cfg.rate : 0.0,
+                a.cfg.rate ? 1000.0 * a.min_fill_frames / a.cfg.rate : 0.0, n.jitter_ms);
+        g_free(ts);
+        g_date_time_unref(t);
+        last_under = a.underruns; last_resync = a.resyncs; last_lost = n.lost;
+    }
+
     if (!n.listening) {
         gtk_label_set_text(GTK_LABEL(UI.status), "Not listening");
     } else if (!n.active) {
@@ -165,9 +180,10 @@ static gboolean refresh(gpointer data)
     }
     gtk_label_set_text(GTK_LABEL(UI.format), buf);
 
-    double loss_pct = n.packets + n.lost ? 100.0 * n.lost / (double)(n.packets + n.lost) : 0.0;
-    snprintf(buf, sizeof(buf), "%" G_GUINT64_FORMAT " received · %" G_GUINT64_FORMAT " lost (%.3f %%) · %" G_GUINT64_FORMAT " late · %" G_GUINT64_FORMAT " invalid",
-             n.packets, n.lost, loss_pct, n.late, n.invalid);
+    uint64_t total = n.packets + n.lost + n.recovered;
+    double loss_pct = total ? 100.0 * n.lost / (double)total : 0.0;
+    snprintf(buf, sizeof(buf), "%" G_GUINT64_FORMAT " received · %" G_GUINT64_FORMAT " lost (%.3f %%) · %" G_GUINT64_FORMAT " recovered by resend · %" G_GUINT64_FORMAT " late · %" G_GUINT64_FORMAT " invalid",
+             n.packets, n.lost, loss_pct, n.recovered, n.late, n.invalid);
     gtk_label_set_text(GTK_LABEL(UI.packets), buf);
 
     if (n.phone_volume >= 0)
@@ -198,7 +214,7 @@ static gboolean refresh(gpointer data)
                  a.quantum, q_ms, a.device_delay_ms);
         gtk_label_set_text(GTK_LABEL(UI.output), buf);
         double pkt_ms = n.cfg.rate ? 1000.0 * n.frames_per_packet / n.cfg.rate : 0;
-        snprintf(buf, sizeof(buf), "≈ %.0f ms on this PC (buffer + device) + %.0f ms packetisation + Wi-Fi + phone capture (~20 ms)",
+        snprintf(buf, sizeof(buf), "≈ %.0f ms on this PC (buffer + device) + %.0f ms packetisation + Wi-Fi + phone capture & pacing (~25 ms)",
                  avg_ms + a.device_delay_ms, pkt_ms);
         gtk_label_set_text(GTK_LABEL(UI.latency), buf);
     } else {
@@ -402,11 +418,11 @@ static gboolean headless_tick(gpointer data)
     } else {
         double fill_ms = a.cfg.rate ? 1000.0 * a.avg_fill_frames / a.cfg.rate : 0;
         double min_ms = a.cfg.rate ? 1000.0 * a.min_fill_frames / a.cfg.rate : 0;
-        printf("%s %d Hz %s | %s | pkts %" G_GUINT64_FORMAT " lost %" G_GUINT64_FORMAT " late %" G_GUINT64_FORMAT
+        printf("%s %d Hz %s | %s | pkts %" G_GUINT64_FORMAT " lost %" G_GUINT64_FORMAT " recovered %" G_GUINT64_FORMAT " late %" G_GUINT64_FORMAT
                " | %.0f kbit/s jit %.2f ms | buf avg %.1f min %.1f ms | drop %" G_GUINT64_FORMAT " ins %" G_GUINT64_FORMAT
                " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT " | dev %.1f ms | peak %.1f/%.1f dB | vol %.0f%%\n",
                n.sender, n.cfg.rate, hfs_format_name(n.cfg.format), state_name(a.state),
-               n.packets, n.lost, n.late, n.bitrate_kbps, n.jitter_ms, fill_ms, min_ms,
+               n.packets, n.lost, n.recovered, n.late, n.bitrate_kbps, n.jitter_ms, fill_ms, min_ms,
                a.drops, a.inserts, a.resyncs, a.underruns, a.device_delay_ms,
                to_db(a.peak[0]), to_db(a.peak[1]), n.phone_volume >= 0 ? n.phone_volume * 100 : 100.0);
     }

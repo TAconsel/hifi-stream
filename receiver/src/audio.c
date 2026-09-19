@@ -19,7 +19,8 @@
 #define UNDERRUN_REBUFFER 0.25   /* seconds of continuous underrun before re-prebuffering */
 #define HARD_LIMIT_MS     100.0  /* fill above min+target+this => hard resync */
 #define PREBUFFER_EXTRA_MS 20.0  /* headroom above the margin when starting */
-#define MIN_WINDOW_SECONDS 1.0   /* window for the minimum-fill tracker */
+#define MIN_WINDOW_SECONDS 5.0   /* bucket of the minimum-fill tracker (memory 5-10 s) */
+#define ADJUST_GAP_FRAMES (XFADE_MAX * 200) /* frames between corrections: <= 0.5 % speed change */
 
 struct audio {
     struct audio_options opts;
@@ -55,6 +56,7 @@ struct audio {
     int64_t win_min, prev_min;  /* minimum fill in the current and previous window */
     int64_t win_frames;
     int64_t underrun_run;       /* frames of continuous silence emitted */
+    int64_t since_adjust;       /* frames rendered since the last drop/insert */
     float  *scratch;            /* quantum + XFADE_MAX frames */
     size_t  scratch_frames;
 };
@@ -120,6 +122,31 @@ void audio_push_silence(int frames)
         memset(A.ring + pos * A.stride, 0, A.stride * sizeof(float));
     }
     atomic_store_explicit(&A.wpos, w + frames, memory_order_release);
+}
+
+uint64_t audio_write_pos(void)
+{
+    return atomic_load_explicit(&A.wpos, memory_order_acquire);
+}
+
+bool audio_patch(uint64_t at, const float *samples, int frames)
+{
+    if (!A.ring || frames <= 0)
+        return false;
+    uint64_t r = atomic_load_explicit(&A.rpos, memory_order_acquire);
+    uint64_t w = atomic_load_explicit(&A.wpos, memory_order_acquire);
+    if (at < r || at + (uint64_t)frames > w)
+        return false;             /* already played (or flushed away) */
+    size_t pos = (size_t)(at % A.cap_frames);
+    size_t first = A.cap_frames - pos;
+    if (first > (size_t)frames)
+        first = frames;
+    memcpy(A.ring + pos * A.stride, samples, first * A.stride * sizeof(float));
+    if ((size_t)frames > first)
+        memcpy(A.ring, samples + first * A.stride, (frames - first) * A.stride * sizeof(float));
+    /* If the reader overtook us meanwhile the packet was partly late; the
+     * consumer copied whatever was there, which is at worst the silence. */
+    return atomic_load_explicit(&A.rpos, memory_order_acquire) <= at;
 }
 
 void audio_flush(void)
@@ -206,7 +233,8 @@ static void render(float *dst, int n)
         state = AUDIO_PLAYING;
     }
 
-    /* Sliding-window minimum of the fill level (two 1 s buckets). */
+    /* Sliding-window minimum of the fill level (two buckets), long enough
+     * that a network hole every few seconds keeps its cushion. */
     if (fill < A.win_min) A.win_min = fill;
     A.win_frames += n;
     if (A.win_frames >= (int64_t)(MIN_WINDOW_SECONDS * rate)) {
@@ -222,15 +250,16 @@ static void render(float *dst, int n)
 
     if (fill < n) {
         /* Underrun: play what we have, pad with silence. The padding shifts
-         * the stream's timing exactly like an insert, so account for it. */
+         * the stream's timing like an insert, but unlike an insert it was
+         * forced, so it is not credited to the minimum: the tracker keeps
+         * saying the buffer hit bottom, and the controller inserts until the
+         * cushion would have covered this hole. */
         int have = (int)fill;
         if (have > 0)
             ring_read(dst, have);
         memset(dst + have * stride, 0, (size_t)(n - have) * stride * sizeof(float));
         atomic_fetch_add(&A.underruns, 1);
         A.underrun_run += n - have;
-        A.win_min += n - have;
-        A.prev_min += n - have;
         if (A.underrun_run > (int64_t)(UNDERRUN_REBUFFER * rate))
             atomic_store(&A.state, AUDIO_PREBUFFER);
         return;
@@ -256,8 +285,14 @@ static void render(float *dst, int n)
     int tol = 2 * k;
     if (tol < rate / 250) tol = rate / 250;       /* deadband of >= 4 ms around the margin */
 
-    if (k >= 4 && mfill > target + tol && fill >= n + k) {
+    /* Corrections are rate-limited so trimming a cushion left by a network
+     * hole is a 0.5 % tempo change over seconds, not a 20 % one over 300 ms. */
+    A.since_adjust += n;
+    int may_adjust = A.since_adjust >= ADJUST_GAP_FRAMES;
+
+    if (may_adjust && k >= 4 && mfill > target + tol && fill >= n + k) {
         /* Buffer runs long: read n+k, crossfade the tail into the skipped part. */
+        A.since_adjust = 0;
         ring_read(A.scratch, n + k);
         memcpy(dst, A.scratch, (size_t)(n - k) * stride * sizeof(float));
         xfade(dst + (n - k) * stride, A.scratch + (n - k) * stride, A.scratch + n * stride, k, stride);
@@ -265,8 +300,9 @@ static void render(float *dst, int n)
         A.prev_min -= k;
         A.ema_fill -= k;
         atomic_fetch_add(&A.drops, 1);
-    } else if (k >= 4 && mfill < target - tol && fill >= n - k && n - k >= 2 * k) {
+    } else if (may_adjust && k >= 4 && mfill < target - tol && fill >= n - k && n - k >= 2 * k) {
         /* Buffer runs short: read n-k, repeat the last k with a crossfade. */
+        A.since_adjust = 0;
         int l = n - k;
         ring_read(A.scratch, l);
         memcpy(dst, A.scratch, (size_t)(l - k) * stride * sizeof(float));
@@ -406,6 +442,7 @@ int audio_configure(const struct audio_config *cfg)
     atomic_store(&A.underruns, 0); atomic_store(&A.overflows, 0);
     atomic_store(&A.drops, 0);     atomic_store(&A.inserts, 0);
     atomic_store(&A.resyncs, 0);
+    A.since_adjust = 0;
     A.ema_fill = 0;
     A.underrun_run = 0;
 

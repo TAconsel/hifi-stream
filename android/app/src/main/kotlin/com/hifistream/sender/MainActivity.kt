@@ -434,6 +434,13 @@ fun StatusCard() {
                         (if (StreamState.readErrors > 0) " · ${StreamState.readErrors} errors" else ""),
                     style = MaterialTheme.typography.bodyMedium
                 )
+                if (StreamState.capturePeriodMs > 0) {
+                    Text("Android delivers audio every %.1f ms (worst %.0f ms) · packets paced %.0f ms behind capture".format(
+                        StreamState.capturePeriodMs, StreamState.captureLatencyMs, StreamState.paceMs) +
+                        (if (StreamState.latePackets > 0) " · ${StreamState.latePackets} late" else "") +
+                        (if (StreamState.resent > 0) " · ${StreamState.resent} resent" else ""),
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 if (StreamState.systemMode) {
                     Text("System mode · exclusive routing" +
                         (if (StreamState.phoneVolume >= 0f) " · phone volume ${(StreamState.phoneVolume * 100).toInt()} %" else ""),

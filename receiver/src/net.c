@@ -18,6 +18,20 @@
 
 #define SESSION_TIMEOUT_NS  2000000000ULL
 #define MAX_FRAMES_PER_PKT  4096
+#define PENDING_MAX         128          /* lost packets we may still recover */
+#define NACK_RETRY_NS       10000000ULL  /* re-ask every 10 ms ... */
+#define NACK_MAX_TRIES      4            /* ... at most this often */
+
+/* A packet that was missing when its successor arrived. Its slot in the
+ * jitter buffer holds silence until a retransmission lands, or it is played. */
+struct pending {
+    uint16_t seq;
+    uint8_t  tries;
+    bool     used;
+    uint64_t pos;          /* stream position of the silence */
+    uint64_t last_nack_ns;
+    long     dump_off;     /* byte offset of the silence in the WAV dump, -1 if none */
+};
 
 struct net {
     int sock;
@@ -29,6 +43,8 @@ struct net {
     pthread_mutex_t lock;        /* protects the fields below */
     struct net_stats st;
     bool have_session;
+    struct sockaddr_in peer;     /* where the current sender's packets come from */
+    struct pending pending[PENDING_MAX];
     uint16_t next_seq;
     uint64_t last_rx_ns;
     uint64_t session_start_ns;
@@ -36,6 +52,7 @@ struct net {
     uint64_t win_start_ns, win_bytes;
     /* jitter */
     int64_t  last_transit;
+    uint64_t last_rx_pkt_ns;     /* arrival of the previous audio packet */
     double   jitter;             /* in microseconds */
     /* wav dump */
     FILE    *dump;
@@ -130,6 +147,81 @@ static void convert_to_float(const uint8_t *src, int fmt, int samples, float *ds
     }
 }
 
+/* ---- retransmission ------------------------------------------------------- */
+
+static void send_nack_locked(const uint16_t *seqs, int n)
+{
+    uint8_t msg[8 + 2 * HFS_NACK_MAX];
+    memcpy(msg, HFS_NACK_MSG, 8);
+    for (int i = 0; i < n; i++) {
+        msg[8 + 2 * i] = (uint8_t)seqs[i];
+        msg[9 + 2 * i] = (uint8_t)(seqs[i] >> 8);
+    }
+    sendto(N.sock, msg, 8 + 2 * (size_t)n, MSG_DONTWAIT, (const struct sockaddr *)&N.peer, sizeof(N.peer));
+    N.st.nacks++;
+}
+
+static void pending_clear_locked(void)
+{
+    memset(N.pending, 0, sizeof(N.pending));
+}
+
+/* Records `count` packets from `seq` as missing at stream position `pos`
+ * and asks the sender for them straight away. */
+static void pending_add_locked(uint16_t seq, int count, uint64_t pos, int frames, long dump_off, int nsamples, uint64_t now)
+{
+    uint16_t ask[HFS_NACK_MAX];
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+        struct pending *slot = NULL;
+        for (int j = 0; j < PENDING_MAX; j++)
+            if (!N.pending[j].used) { slot = &N.pending[j]; break; }
+        if (!slot)
+            break;
+        slot->used = true;
+        slot->seq = (uint16_t)(seq + i);
+        slot->tries = 1;
+        slot->pos = pos + (uint64_t)i * (uint64_t)frames;
+        slot->last_nack_ns = now;
+        slot->dump_off = dump_off < 0 ? -1 : dump_off + (long)i * nsamples * (long)sizeof(float);
+        if (n < HFS_NACK_MAX)
+            ask[n++] = slot->seq;
+    }
+    if (n > 0)
+        send_nack_locked(ask, n);
+}
+
+/* Re-asks for packets still worth having; gives up after a few tries
+ * (by then their slot has long been played). */
+static void pending_tick_locked(uint64_t now)
+{
+    uint16_t ask[HFS_NACK_MAX];
+    int n = 0;
+    for (int j = 0; j < PENDING_MAX; j++) {
+        struct pending *p = &N.pending[j];
+        if (!p->used || now - p->last_nack_ns < NACK_RETRY_NS)
+            continue;
+        if (p->tries >= NACK_MAX_TRIES) {
+            p->used = false;
+            continue;
+        }
+        p->tries++;
+        p->last_nack_ns = now;
+        if (n < HFS_NACK_MAX)
+            ask[n++] = p->seq;
+    }
+    if (n > 0)
+        send_nack_locked(ask, n);
+}
+
+static struct pending *pending_find_locked(uint16_t seq)
+{
+    for (int j = 0; j < PENDING_MAX; j++)
+        if (N.pending[j].used && N.pending[j].seq == seq)
+            return &N.pending[j];
+    return NULL;
+}
+
 static void end_session_locked(void)
 {
     if (N.have_session) {
@@ -177,9 +269,11 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.next_seq = h.seq;
         N.session_start_ns = rx_ns;
         N.st.packets = N.st.bytes = N.st.lost = N.st.late = 0;
+        N.st.nacks = N.st.recovered = 0;
+        pending_clear_locked();
         N.win_start_ns = rx_ns; N.win_bytes = 0;
         N.st.phone_volume = -1;
-        N.jitter = 0; N.last_transit = 0;
+        N.jitter = 0; N.last_transit = 0; N.last_rx_pkt_ns = 0;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &from->sin_addr, ip, sizeof(ip));
         snprintf(N.st.sender, sizeof(N.st.sender), "%s:%u", ip, ntohs(from->sin_port));
@@ -189,10 +283,29 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
     N.st.frames_per_packet = (int)h.frames;
     N.st.active = true;
     N.last_rx_ns = rx_ns;
+    N.peer = *from;
 
     int16_t diff = (int16_t)(h.seq - N.next_seq);
     if (diff < 0) {
-        /* late or duplicate: we already substituted silence for it */
+        /* A packet we already substituted silence for: a retransmission we
+         * asked for, or just late. Either way it is still worth playing if
+         * its slot has not been reached yet. */
+        struct pending *p = pending_find_locked(h.seq);
+        if (p) {
+            p->used = false;
+            if (audio_patch(p->pos, samples, (int)h.frames)) {
+                N.st.recovered++;
+                N.st.lost--;
+                if (N.dump && p->dump_off >= 0) {
+                    long end = ftell(N.dump);
+                    fseek(N.dump, p->dump_off, SEEK_SET);
+                    fwrite(samples, sizeof(float), (size_t)nsamples, N.dump);
+                    fseek(N.dump, end, SEEK_SET);
+                }
+                pthread_mutex_unlock(&N.lock);
+                return;
+            }
+        }
         N.st.late++;
         pthread_mutex_unlock(&N.lock);
         return;
@@ -200,6 +313,8 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
     if (diff > 0) {
         if (diff < 200) {
             N.st.lost += diff;
+            uint64_t pos = audio_write_pos();
+            long dump_off = N.dump ? ftell(N.dump) : -1;
             audio_push_silence(diff * (int)h.frames);
             if (N.dump) {
                 static const float zeros[MAX_FRAMES_PER_PKT * 2];
@@ -207,6 +322,8 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
                     fwrite(zeros, sizeof(float), (size_t)nsamples, N.dump);
                 N.dump_frames += (uint64_t)diff * h.frames;
             }
+            if (audio_write_pos() != pos)   /* silence really went in: recoverable */
+                pending_add_locked(N.next_seq, diff, pos, (int)h.frames, dump_off, nsamples, rx_ns);
         } else {
             /* the sender restarted: resynchronise instead of padding seconds of silence */
             audio_flush();
@@ -222,14 +339,21 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.win_start_ns = rx_ns;
         N.win_bytes = 0;
     }
-    /* RFC 3550 inter-arrival jitter using the sender's timestamp (both in µs) */
+    /* RFC 3550 inter-arrival jitter using the sender's timestamp (both in µs).
+     * The sender releases packets in small groups, so packets that arrive on
+     * the heels of another (< 1 ms) carry the group's hold, not the network's
+     * delay; only the first packet of each bunch is a clean sample. */
     int64_t transit = (int64_t)(rx_ns / 1000) - (int64_t)h.ts_us;
-    if (N.last_transit != 0) {
-        double d = (double)(transit - N.last_transit);
-        if (d < 0) d = -d;
-        N.jitter += (d - N.jitter) / 16.0;
+    bool leader = N.last_rx_pkt_ns == 0 || rx_ns - N.last_rx_pkt_ns >= 1000000ULL;
+    if (leader) {
+        if (N.last_transit != 0) {
+            double d = (double)(transit - N.last_transit);
+            if (d < 0) d = -d;
+            N.jitter += (d - N.jitter) / 16.0;
+        }
+        N.last_transit = transit;
     }
-    N.last_transit = transit;
+    N.last_rx_pkt_ns = rx_ns;
     N.st.jitter_ms = N.jitter / 1000.0;
     N.st.session_seconds = (rx_ns - N.session_start_ns) / 1e9;
 
@@ -238,6 +362,7 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.dump_frames += h.frames;
         N.st.dump_frames = N.dump_frames;
     }
+    pending_tick_locked(rx_ns);
     pthread_mutex_unlock(&N.lock);
 
     audio_push(samples, (int)h.frames);

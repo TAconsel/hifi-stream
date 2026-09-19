@@ -46,14 +46,27 @@ writes exactly what arrives, which is how the numbers below were verified.
   graph to run at the stream's rate, so 44.1/48/96 kHz all play bit-exact.
 * Jitter buffer regulated on the **minimum** fill over the last second: the
   *safety margin* slider says how much audio must always be buffered; the
-  actual latency adapts to the measured jitter on top of that. Android's
-  capture delivers audio in 20 ms bursts, so the buffer settles at ≈ 25 ms
-  average with a 10 ms margin.
+  actual latency adapts to the measured jitter on top of that.
+* The phone smooths its own output: Android delivers captured audio one HAL
+  period at a time (2048 frames ≈ 21 ms on the remote-submix path), so the app
+  keeps a software audio clock phase-locked to those deliveries (the submix
+  pipe is software-timed and runs several hundred ppm off nominal) and paces
+  packets out in groups of four (7.5 ms) instead of firing a dozen at once,
+  each stamped with its departure time. The receiver then sees genuine Wi-Fi
+  jitter rather than 21 ms bursts, and its "jitter" figure means what it says.
+* After a network hole the buffer keeps the cushion it would have needed for
+  5–10 s instead of trimming straight back to the margin, so a hole that
+  repeats every few seconds only costs one dropout, not one per repeat. The
+  default margin is 20 ms; on a congested AP with 50–100 ms holes raise it.
 * Clock drift between phone and DAC is absorbed with 64-frame crossfaded
   drops/inserts (WSOLA-style, no pitch change, no clicks); when the buffer is
   in tolerance the samples pass through untouched.
-* Lost packets become silence of the right length so timing is preserved;
-  a stall longer than ~100 ms triggers a hard resync so latency never creeps up.
+* Lost packets become silence of the right length so timing is preserved, and
+  are requested again from the phone at once (NACK, see PROTOCOL.md); a resend
+  that lands before the spot is played replaces the silence. With 2 % random
+  loss injected on the PC: 616 recovered, 1 lost, no dropouts; with 10 %:
+  2 132 recovered, 19 lost, no dropouts. A stall longer than ~100 ms triggers
+  a hard resync so latency never creeps up.
 
 ## Android app
 
@@ -86,6 +99,12 @@ DSCP EF on the socket (Wi-Fi WMM voice queue), partial wake lock.
   receiver's WAV dump equals the source sample.
 * Steady state at 48 kHz / 24-bit: 0.02 % packet loss, 0.6 ms network jitter,
   ~24 ms buffered + 5.3 ms PipeWire ≈ 29 ms on the PC; phone capture adds ~20 ms.
+* 96 kHz / 32-bit float on an Xperia 1 II in system mode, before/after packet
+  pacing (per-packet pacing, quiet air): inter-arrival p99 21.5 → 4.2 ms,
+  max 28 → 9.5 ms; sender timestamp spacing σ 5.5 → 0.00 ms; 0 packets lost
+  either way. The app logs `late packet` lines (adb logcat -s HiFiStream)
+  whenever a packet leaves > 4 ms late and says whether Android delivered the
+  audio late or the sender thread overslept, so a dropout can be attributed.
 * 96 kHz / 24-bit (4.7 Mbit/s) streams just as well; PipeWire switched the
   graph to 96 kHz.
 

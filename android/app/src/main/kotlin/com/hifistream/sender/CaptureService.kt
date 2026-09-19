@@ -50,6 +50,8 @@ class CaptureService : Service() {
         const val EXTRA_MUTE = "mute"
         const val EXTRA_SYSTEM = "system"
         const val EXTRA_FORWARD_VOLUME = "forwardVolume"
+        const val EXTRA_PACE_GROUP = "paceGroup"
+        const val DEFAULT_PACE_GROUP = 4      // packets sent back-to-back per pacing slot
         private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
         private const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
         private const val CHANNEL_ID = "streaming"
@@ -112,6 +114,7 @@ class CaptureService : Service() {
         val host = intent.getStringExtra(EXTRA_HOST) ?: ""
         val port = intent.getIntExtra(EXTRA_PORT, StreamProtocol.DEFAULT_PORT)
         val rate = intent.getIntExtra(EXTRA_RATE, 48000)
+        paceGroup = intent.getIntExtra(EXTRA_PACE_GROUP, DEFAULT_PACE_GROUP).coerceIn(1, 64)
         val format = StreamProtocol.Format.fromId(intent.getIntExtra(EXTRA_FORMAT, StreamProtocol.Format.S24.id))
         val mute = intent.getBooleanExtra(EXTRA_MUTE, true) && !system
         if (system) {
@@ -212,6 +215,7 @@ class CaptureService : Service() {
         if (mute) mutePhone()
 
         running = true
+        readErrors = 0
         StreamState.running = true
         StreamState.systemMode = system
         StreamState.error = null
@@ -264,10 +268,6 @@ class CaptureService : Service() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val framesPerPacket = StreamProtocol.framesPerPacket(rate, CHANNELS, format)
         mainHandler.post { StreamState.framesPerPacket = framesPerPacket }
-        val samples = FloatArray(framesPerPacket * CHANNELS)
-        val shorts = if (rec.audioFormat == AudioFormat.ENCODING_PCM_16BIT) ShortArray(samples.size) else null
-        val buf = ByteBuffer.allocate(StreamProtocol.HEADER_SIZE + samples.size * format.bytesPerSample)
-            .order(ByteOrder.LITTLE_ENDIAN)
         val socket: DatagramSocket
         val address: InetAddress
         try {
@@ -279,67 +279,62 @@ class CaptureService : Service() {
             mainHandler.post { fail("Bad receiver address: $host") }
             return
         }
-        val packet = DatagramPacket(buf.array(), 0, address, port)
-
-        var seq = 0
-        var analysed = 0L          // non-zero samples inspected for the source resolution
-        var hiRes = false
-        var packets = 0L
-        var bytes = 0L
-        var readErrors = 0L
-        val startMs = SystemClock.elapsedRealtime()
-        var lastStatMs = startMs
-        var windowBytes = 0L
 
         rec.startRecording()
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             mainHandler.post { fail("Capture did not start (is another app capturing?)") }
             return
         }
+
+        // Capture is split in two: a reader that only drains AudioRecord (so its blocking
+        // reads are clean observations of when Android delivered audio) and this thread,
+        // which stamps and paces packets out of the ring buffer (see PacketClock).
+        val clock = PacketClock(rate)
+        val ring = SampleRing(rate * CHANNELS)              // one second
+        val reader = Thread({ readLoop(rec, rate, clock, ring, framesPerPacket) }, "hfs-read").also { it.start() }
+
+        val samples = FloatArray(framesPerPacket * CHANNELS)
+        val buf = ByteBuffer.allocate(StreamProtocol.HEADER_SIZE + samples.size * format.bytesPerSample)
+            .order(ByteOrder.LITTLE_ENDIAN)
+        val packet = DatagramPacket(buf.array(), 0, address, port)
+        // Every packet sent is kept for a while so the receiver can ask for it again
+        // (HFS_NACK) when it notices a gap: a resend usually lands well inside its
+        // jitter buffer, which is how a lost packet becomes silence-free.
+        val history = PacketHistory(StreamProtocol.HISTORY, buf.capacity())
+        val nackThread = Thread({ nackLoop(socket, history, address, port) }, "hfs-nack").also { it.start() }
+        var seq = 0
+        var framePos = 0L          // audio position of the next frame to send
+        var packets = 0L
+        var bytes = 0L
+        var sendErrors = 0L
+        val startMs = SystemClock.elapsedRealtime()
+        var lastStatMs = startMs
+        var windowBytes = 0L
         try {
             var lastVolMs = 0L
+            var groupSendUs = 0L
             while (running) {
-                val n = if (shorts != null) {
-                    val m = rec.read(shorts, 0, shorts.size, AudioRecord.READ_BLOCKING)
-                    for (i in 0 until maxOf(m, 0)) samples[i] = shorts[i] / 32768f
-                    m
-                } else {
-                    rec.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
+                if (!ring.take(samples, samples.size, 200)) continue
+                // Packets leave in small groups: one frame per TXOP would cost the Wi-Fi
+                // driver its A-MPDU aggregation and congest the air, one burst per HAL
+                // period is what the pacing exists to avoid.
+                if (seq % paceGroup == 0) {
+                    clock.waitUntilDue(framePos)
+                    groupSendUs = SystemClock.elapsedRealtimeNanos() / 1000
                 }
-                if (n <= 0) {
-                    readErrors++
-                    if (n < 0) {
-                        mainHandler.post { fail("Capture read error $n") }
-                        break
-                    }
-                    continue
-                }
-                val frames = n / CHANNELS
-                if (!hiRes && analysed < rate * 4L) {
-                    // Android's playback capture is 16-bit on most devices: detect whether
-                    // any sample carries more than 16 bits so the UI can say so honestly.
-                    for (i in 0 until n) {
-                        val v = samples[i]
-                        if (v == 0f) continue
-                        analysed++
-                        val scaled = v * 32768f
-                        if (scaled != Math.round(scaled).toFloat()) { hiRes = true; break }
-                    }
-                    if (hiRes || analysed >= rate * 4L) {
-                        val bits = if (hiRes) 24 else 16
-                        mainHandler.post { StreamState.sourceBits = bits }
-                    }
-                }
-                val tsUs = SystemClock.elapsedRealtimeNanos() / 1000
+                // The wire timestamp is the departure time (shared by a group), so the
+                // receiver's jitter figure measures the network and nothing else.
                 buf.clear()
-                StreamProtocol.writeHeader(buf, seq, format, CHANNELS, rate, frames, tsUs)
-                StreamProtocol.writeSamples(buf, samples, frames * CHANNELS, format)
+                StreamProtocol.writeHeader(buf, seq, format, CHANNELS, rate, framesPerPacket, groupSendUs)
+                StreamProtocol.writeSamples(buf, samples, samples.size, format)
                 packet.setData(buf.array(), 0, buf.position())
                 try {
                     socket.send(packet)
                 } catch (e: Exception) {
-                    readErrors++
+                    sendErrors++
                 }
+                history.put(seq, buf.array(), buf.position())
+                framePos += framesPerPacket
                 seq++
                 packets++
                 bytes += buf.position()
@@ -358,12 +353,21 @@ class CaptureService : Service() {
                 }
                 if (now - lastStatMs >= 500) {
                     val kbps = windowBytes * 8.0 / (now - lastStatMs)
-                    val p = packets; val e = readErrors; val secs = (now - startMs) / 1000
+                    val p = packets; val e = sendErrors + readErrors + ring.overruns; val secs = (now - startMs) / 1000
+                    val lat = clock.latencyUs / 1000.0; val pace = clock.paceUs / 1000.0
+                    val period = 1000.0 * clock.periodFrames / rate
+                    val lp = clock.latePackets
+                    val rs = history.resent
                     mainHandler.post {
+                        StreamState.resent = rs
                         StreamState.packets = p
                         StreamState.kbps = kbps
                         StreamState.seconds = secs
                         StreamState.readErrors = e
+                        StreamState.captureLatencyMs = lat
+                        StreamState.capturePeriodMs = period
+                        StreamState.paceMs = pace
+                        StreamState.latePackets = lp
                     }
                     windowBytes = 0
                     lastStatMs = now
@@ -371,12 +375,115 @@ class CaptureService : Service() {
             }
         } finally {
             try {
+                reader.join(2000)
+            } catch (_: InterruptedException) {
+            }
+            try {
                 val bye = StreamProtocol.BYE.toByteArray()
                 socket.send(DatagramPacket(bye, bye.size, address, port))
             } catch (_: Exception) {
             }
-            socket.close()
+            socket.close()          // also unblocks the NACK thread
+            try {
+                nackThread.join(1000)
+            } catch (_: InterruptedException) {
+            }
             Log.i(TAG, "sent $packets packets, $bytes bytes")
+        }
+    }
+
+    /** Answers the receiver's retransmission requests from the packet history. */
+    private fun nackLoop(socket: DatagramSocket, history: PacketHistory, address: InetAddress, port: Int) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        val nack = StreamProtocol.NACK.toByteArray()
+        val rx = ByteArray(512)
+        val rxPacket = DatagramPacket(rx, rx.size)
+        val resend = DatagramPacket(ByteArray(0), 0, address, port)
+        while (running) {
+            try {
+                rxPacket.setData(rx, 0, rx.size)
+                socket.receive(rxPacket)
+            } catch (_: Exception) {
+                if (socket.isClosed) return
+                continue
+            }
+            val n = rxPacket.length
+            if (n < nack.size + 2 || !rx.copyOfRange(0, nack.size).contentEquals(nack)) continue
+            var i = nack.size
+            while (i + 1 < n) {
+                val seq = (rx[i].toInt() and 0xFF) or ((rx[i + 1].toInt() and 0xFF) shl 8)
+                i += 2
+                history.get(seq)?.let { (data, len) ->
+                    resend.setData(data, 0, len)
+                    try {
+                        socket.send(resend)
+                        history.resent++
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+    }
+
+    @Volatile private var readErrors = 0L
+    private var paceGroup = DEFAULT_PACE_GROUP
+
+    /** Drains AudioRecord into the ring as fast as Android delivers, feeding the clock. */
+    private fun readLoop(rec: AudioRecord, rate: Int, clock: PacketClock, ring: SampleRing, framesPerRead: Int) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        // A blocking read of one packet returns the moment a HAL period lands; the rest of
+        // that period is then drained without blocking so the clock sees the whole delivery
+        // (first frame, last frame, time) as one observation.
+        val samples = FloatArray(rate * CHANNELS / 4)          // 250 ms, more than any HAL period
+        val shorts = if (rec.audioFormat == AudioFormat.ENCODING_PCM_16BIT) ShortArray(samples.size) else null
+        val head = framesPerRead * CHANNELS
+        var framePos = 0L
+        var analysed = 0L          // non-zero samples inspected for the source resolution
+        var hiRes = false
+        fun read(offset: Int, count: Int, mode: Int): Int =
+            if (shorts != null) {
+                val m = rec.read(shorts, offset, count, mode)
+                for (i in offset until offset + maxOf(m, 0)) samples[i] = shorts[i] / 32768f
+                m
+            } else {
+                rec.read(samples, offset, count, mode)
+            }
+        while (running) {
+            val readStartUs = SystemClock.elapsedRealtimeNanos() / 1000
+            var n = read(0, head, AudioRecord.READ_BLOCKING)
+            if (n <= 0) {
+                readErrors++
+                if (n < 0) {
+                    mainHandler.post { fail("Capture read error $n") }
+                    running = false
+                    break
+                }
+                continue
+            }
+            val blockedUs = SystemClock.elapsedRealtimeNanos() / 1000 - readStartUs
+            if (n == head) {
+                val more = read(head, samples.size - head, AudioRecord.READ_NON_BLOCKING)
+                if (more > 0) n += more
+            }
+            val frames = n / CHANNELS
+            clock.onRead(framePos, frames, blockedUs)
+            framePos += frames
+            ring.put(samples, n)
+            if (!hiRes && analysed < rate * 4L) {
+                // Android's playback capture is 16-bit on most devices: detect whether
+                // any sample carries more than 16 bits so the UI can say so honestly.
+                for (i in 0 until n) {
+                    val v = samples[i]
+                    if (v == 0f) continue
+                    analysed++
+                    val scaled = v * 32768f
+                    if (scaled != Math.round(scaled).toFloat()) { hiRes = true; break }
+                }
+                if (hiRes || analysed >= rate * 4L) {
+                    val bits = if (hiRes) 24 else 16
+                    mainHandler.post { StreamState.sourceBits = bits }
+                }
+            }
         }
     }
 

@@ -16,6 +16,11 @@ object StreamState {
     var readErrors by mutableStateOf(0L)
     var framesPerPacket by mutableStateOf(0)
     var sourceBits by mutableStateOf(0)   // 0 = not yet known, 16 or 24 (= more than 16)
+    var captureLatencyMs by mutableStateOf(0.0)   // worst delivery latency of a HAL period recently
+    var capturePeriodMs by mutableStateOf(0.0)    // Android's HAL period as measured
+    var paceMs by mutableStateOf(0.0)             // delay added to smooth packets out
+    var latePackets by mutableStateOf(0L)         // sent > 4 ms after they were due
+    var resent by mutableStateOf(0L)              // packets resent on the receiver's request
     var host by mutableStateOf("")
     var rate by mutableStateOf(0)
     var systemMode by mutableStateOf(false)

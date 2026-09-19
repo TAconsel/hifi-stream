@@ -14,6 +14,7 @@ struct net_stats {
     struct audio_config cfg;     /* current session format */
     int      frames_per_packet;
     uint64_t packets, bytes, lost, late, invalid;
+    uint64_t nacks, recovered;   /* retransmission requests sent, lost packets recovered in time */
     double   bitrate_kbps;       /* averaged over the last second */
     double   jitter_ms;          /* RFC 3550 style inter-arrival jitter */
     double   session_seconds;
