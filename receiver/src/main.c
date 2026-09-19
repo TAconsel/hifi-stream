@@ -293,7 +293,7 @@ static void build_window(GtkApplication *app)
 {
     UI.window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(UI.window), "HiFi Stream Receiver");
-    gtk_window_set_default_size(GTK_WINDOW(UI.window), 660, 640);
+    gtk_window_set_default_size(GTK_WINDOW(UI.window), 680, 840);
 
     GtkWidget *header = gtk_header_bar_new();
     gtk_window_set_titlebar(GTK_WINDOW(UI.window), header);
