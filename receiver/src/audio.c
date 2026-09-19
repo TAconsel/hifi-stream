@@ -6,7 +6,6 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
 #include <spa/param/props.h>
-#include <spa/utils/dll.h>
 
 #include <math.h>
 #include <stdatomic.h>
@@ -23,8 +22,13 @@
 #define MIN_WINDOW_SECONDS 5.0   /* bucket of the minimum-fill tracker (memory 5-10 s) */
 #define ADJUST_GAP_FRAMES (XFADE_MAX * 200) /* frames between corrections: <= 0.5 % speed change */
 #define SPLICE_MS         20.0   /* fill error beyond this is spliced; below it the resampler rate absorbs it */
-#define RATE_MAX_ERR_MS   20.0   /* error fed to the rate DLL is clamped to this */
-#define RATE_CORR_MAX     0.005  /* +-0.5 % resampler rate */
+#define RATE_MAX_ERR_MS   20.0   /* fill error fed to the rate loop is clamped to this */
+#define RATE_CORR_MAX     0.003  /* +-0.3 % resampler rate */
+#define RATE_KP           0.05   /* per second: a 10 ms error -> 500 ppm; time constant 20 s */
+#define RATE_KI           (RATE_KP * RATE_KP / 4.0) /* critically damped PI on an integrating plant */
+#define ALLOWANCE_SECONDS 30.0   /* how slowly the jitter allowance above the margin adapts */
+#define ALLOWANCE_MIN_MS  3.0
+#define ALLOWANCE_MAX_MS  40.0
 
 struct audio {
     struct audio_options opts;
@@ -61,7 +65,8 @@ struct audio {
     int64_t win_frames;
     int64_t underrun_run;       /* frames of continuous silence emitted */
     int64_t since_adjust;       /* frames rendered since the last drop/insert */
-    struct spa_dll dll;         /* steers the resampler rate on the fill error */
+    double  allowance;          /* frames kept above the margin for jitter, adapts slowly */
+    double  rate_integ;         /* PI integrator, in rate units */
     double  rate_corr;
     _Atomic uint64_t rate_corr_bits;
     struct spa_source *rate_timer;
@@ -295,26 +300,33 @@ static void render(float *dst, int n)
     int tol = 2 * k;
     if (tol < rate / 250) tol = rate / 250;       /* deadband of >= 4 ms around the margin */
 
-    /* Fine regulation: the fill error steers PipeWire's resampler rate through
-     * a DLL (the same mechanism its RTP receiver uses), so clock drift between
-     * phone and DAC and small timing changes are absorbed by playing a few
-     * hundred ppm faster or slower with no splice at all. rate > 1 consumes
-     * the stream faster, i.e. shrinks the buffer. */
+    /* Fine regulation: the fill error steers PipeWire's resampler rate, so
+     * clock drift between phone and DAC and small timing changes are absorbed
+     * by playing a few hundred ppm faster or slower with no splice at all.
+     * rate > 1 consumes the stream faster, i.e. shrinks the buffer.
+     *
+     * The controlled quantity is the smoothed average fill against the margin
+     * plus a jitter allowance. The allowance is what the windowed minimum says
+     * the ripple is, but adapted over tens of seconds, so the loop sees a
+     * symmetric low-lag signal and the slow minimum tracker cannot make it
+     * hunt. A critically damped PI loop then converges without overshoot. */
     {
-        /* The DLL wants a low-lag signal, so it is fed the instantaneous fill
-         * against a target raised by the measured ripple (average minus
-         * windowed minimum): the minimum then settles at the margin, while the
-         * loop itself never waits on the slow minimum tracker. */
         double ripple = A.ema_fill - (double)mfill;
-        if (ripple < 0) ripple = 0;
-        double err = ((double)target + ripple - (double)fill) * 1000.0 / rate;   /* ms, > 0 = too short */
-        if (err > RATE_MAX_ERR_MS) err = RATE_MAX_ERR_MS;
-        if (err < -RATE_MAX_ERR_MS) err = -RATE_MAX_ERR_MS;
-        if (A.dll.bw == 0.0)
-            spa_dll_set_bw(&A.dll, SPA_DLL_BW_MIN, (unsigned)n, (unsigned)rate);
-        double corr = spa_dll_update(&A.dll, err * rate / 1000.0);
+        double amin = ALLOWANCE_MIN_MS * 1e-3 * rate, amax = ALLOWANCE_MAX_MS * 1e-3 * rate;
+        if (ripple < amin) ripple = amin;
+        if (ripple > amax) ripple = amax;
+        double a_alpha = (double)n / (ALLOWANCE_SECONDS * rate);
+        A.allowance += a_alpha * (ripple - A.allowance);
+
+        double err_s = (A.ema_fill - ((double)target + A.allowance)) / rate;   /* seconds, > 0 = too long */
+        double lim = RATE_MAX_ERR_MS * 1e-3;
+        if (err_s > lim) err_s = lim;
+        if (err_s < -lim) err_s = -lim;
+        double dt = (double)n / rate;
+        double corr = 1.0 + RATE_KP * err_s + A.rate_integ;
         if (corr > 1.0 + RATE_CORR_MAX) corr = 1.0 + RATE_CORR_MAX;
-        if (corr < 1.0 - RATE_CORR_MAX) corr = 1.0 - RATE_CORR_MAX;
+        else if (corr < 1.0 - RATE_CORR_MAX) corr = 1.0 - RATE_CORR_MAX;
+        else A.rate_integ += RATE_KI * err_s * dt;   /* anti-windup: only integrate inside the limits */
         if (fabs(corr - A.rate_corr) > 1e-6) {
             /* Applied by the loop timer: controls cannot be set from the RT thread. */
             A.rate_corr = corr;
@@ -483,7 +495,8 @@ int audio_configure(const struct audio_config *cfg)
     atomic_store(&A.drops, 0);     atomic_store(&A.inserts, 0);
     atomic_store(&A.resyncs, 0);
     A.since_adjust = 0;
-    spa_dll_init(&A.dll);
+    A.allowance = ALLOWANCE_MIN_MS * 1e-3 * cfg->rate;
+    A.rate_integ = 0.0;
     A.rate_corr = 1.0;
     { double one = 1.0; uint64_t bits; memcpy(&bits, &one, sizeof(bits)); atomic_store(&A.rate_corr_bits, bits); }
     A.ema_fill = 0;
