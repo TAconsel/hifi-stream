@@ -18,6 +18,8 @@ object StreamState {
     var sourceBits by mutableStateOf(0)   // 0 = not yet known, 16 or 24 (= more than 16)
     var host by mutableStateOf("")
     var rate by mutableStateOf(0)
+    var systemMode by mutableStateOf(false)
+    var phoneVolume by mutableStateOf(-1f)
 }
 
 /** Persistent user settings. */
@@ -44,6 +46,14 @@ class Settings(context: Context) {
     var savedVolume: Int
         get() = prefs.getInt("savedVolume", -1)
         set(v) = prefs.edit().putInt("savedVolume", v).apply()
+
+    var systemMode: Boolean
+        get() = prefs.getBoolean("systemMode", false)
+        set(v) = prefs.edit().putBoolean("systemMode", v).apply()
+
+    var forwardVolume: Boolean
+        get() = prefs.getBoolean("forwardVolume", true)
+        set(v) = prefs.edit().putBoolean("forwardVolume", v).apply()
 
     var mutePhone: Boolean
         get() = prefs.getBoolean("mute", true)

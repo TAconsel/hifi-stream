@@ -5,6 +5,7 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
+#include <spa/param/props.h>
 
 #include <math.h>
 #include <stdatomic.h>
@@ -47,6 +48,7 @@ struct audio {
     _Atomic uint64_t underruns, overflows, drops, inserts, resyncs;
     _Atomic uint32_t peak_bits[2];
     double target_ms;
+    double phone_volume;        /* -1 = not forwarded */
 
     /* RT-thread private */
     double  ema_fill;
@@ -58,6 +60,8 @@ struct audio {
 };
 
 static struct audio A;
+
+static void apply_volume_locked(void);
 
 static inline uint64_t ring_fill(void)
 {
@@ -315,6 +319,7 @@ static void on_state_changed(void *data, enum pw_stream_state old, enum pw_strea
     case PW_STREAM_STATE_STREAMING:
         if (atomic_load(&A.state) == AUDIO_CONNECTING)
             atomic_store(&A.state, AUDIO_PREBUFFER);
+        apply_volume_locked();
         break;
     case PW_STREAM_STATE_PAUSED:
     case PW_STREAM_STATE_CONNECTING:
@@ -341,6 +346,7 @@ int audio_init(const struct audio_options *opts)
     if (A.opts.quantum <= 0)
         A.opts.quantum = 256;
     A.target_ms = 10.0;
+    A.phone_volume = -1;
     pw_init(NULL, NULL);
     A.loop = pw_thread_loop_new("hfs-audio", NULL);
     if (!A.loop)
@@ -450,6 +456,26 @@ int audio_configure(const struct audio_config *cfg)
     return 0;
 }
 
+static void apply_volume_locked(void)
+{
+    if (!A.stream || A.phone_volume < 0)
+        return;
+    /* Cubic mapping: 50 % on the phone's slider = -18 dB, like PulseAudio/PipeWire UIs. */
+    float gain = (float)(A.phone_volume * A.phone_volume * A.phone_volume);
+    float vols[2] = { gain, gain };
+    pw_stream_set_control(A.stream, SPA_PROP_channelVolumes, (uint32_t)A.cfg.channels, vols, 0);
+}
+
+void audio_set_phone_volume(double frac)
+{
+    if (!A.loop)
+        return;
+    pw_thread_loop_lock(A.loop);
+    A.phone_volume = frac;
+    apply_volume_locked();
+    pw_thread_loop_unlock(A.loop);
+}
+
 void audio_set_target_ms(double ms)
 {
     if (ms < 2) ms = 2;
@@ -479,6 +505,7 @@ void audio_get_stats(struct audio_stats *s)
     s->drops = atomic_load(&A.drops);
     s->inserts = atomic_load(&A.inserts);
     s->resyncs = atomic_load(&A.resyncs);
+    s->phone_volume = A.phone_volume;
     for (int c = 0; c < 2; c++) {
         uint32_t bits = atomic_exchange(&A.peak_bits[c], 0);
         memcpy(&s->peak[c], &bits, 4);

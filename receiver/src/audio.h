@@ -35,6 +35,7 @@ struct audio_stats {
     uint64_t inserts;       /* crossfaded frame inserts (buffer running short) */
     uint64_t resyncs;       /* hard skips after a large deviation */
     float peak[2];          /* peak-hold since last call, linear 0..1+ */
+    double phone_volume;    /* as set by audio_set_phone_volume, -1 if none */
 };
 
 struct audio_options {
@@ -57,6 +58,9 @@ void audio_push_silence(int frames);
 /* Drops everything buffered and re-enters prebuffering. */
 void audio_flush(void);
 
+/* Volume forwarded from the phone (0..1 of its volume slider), applied to the
+ * PipeWire stream with the same cubic law desktop mixers use; -1 = full scale. */
+void   audio_set_phone_volume(double frac);
 void   audio_set_target_ms(double ms);
 double audio_get_target_ms(void);
 void   audio_get_stats(struct audio_stats *out);

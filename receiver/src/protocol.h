@@ -12,6 +12,7 @@
 #define HFS_DISCOVER_MSG "HFS_DISCOVER"
 #define HFS_HERE_MSG     "HFS_HERE"
 #define HFS_BYE_MSG      "HFS_BYE"
+#define HFS_VOLUME_MSG   "HFS_VOL"   /* "HFS_VOL 0.63": phone media volume, fraction of max */
 
 enum hfs_format {
     HFS_FMT_S16LE = 1,

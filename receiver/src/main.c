@@ -170,7 +170,12 @@ static gboolean refresh(gpointer data)
              n.packets, n.lost, loss_pct, n.late, n.invalid);
     gtk_label_set_text(GTK_LABEL(UI.packets), buf);
 
-    snprintf(buf, sizeof(buf), "%.0f kbit/s · jitter %.2f ms · %.0f s", n.bitrate_kbps, n.jitter_ms, n.session_seconds);
+    if (n.phone_volume >= 0)
+        snprintf(buf, sizeof(buf), "%.0f kbit/s · jitter %.2f ms · %.0f s · phone volume %.0f %% (%.1f dB)",
+                 n.bitrate_kbps, n.jitter_ms, n.session_seconds, n.phone_volume * 100,
+                 n.phone_volume > 0 ? 60.0 * log10(n.phone_volume) : -100.0);
+    else
+        snprintf(buf, sizeof(buf), "%.0f kbit/s · jitter %.2f ms · %.0f s", n.bitrate_kbps, n.jitter_ms, n.session_seconds);
     gtk_label_set_text(GTK_LABEL(UI.bitrate), buf);
 
     double fill_ms = a.cfg.rate ? 1000.0 * a.fill_frames / a.cfg.rate : 0;
@@ -399,11 +404,11 @@ static gboolean headless_tick(gpointer data)
         double min_ms = a.cfg.rate ? 1000.0 * a.min_fill_frames / a.cfg.rate : 0;
         printf("%s %d Hz %s | %s | pkts %" G_GUINT64_FORMAT " lost %" G_GUINT64_FORMAT " late %" G_GUINT64_FORMAT
                " | %.0f kbit/s jit %.2f ms | buf avg %.1f min %.1f ms | drop %" G_GUINT64_FORMAT " ins %" G_GUINT64_FORMAT
-               " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT " | dev %.1f ms | peak %.1f/%.1f dB\n",
+               " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT " | dev %.1f ms | peak %.1f/%.1f dB | vol %.0f%%\n",
                n.sender, n.cfg.rate, hfs_format_name(n.cfg.format), state_name(a.state),
                n.packets, n.lost, n.late, n.bitrate_kbps, n.jitter_ms, fill_ms, min_ms,
                a.drops, a.inserts, a.resyncs, a.underruns, a.device_delay_ms,
-               to_db(a.peak[0]), to_db(a.peak[1]));
+               to_db(a.peak[0]), to_db(a.peak[1]), n.phone_volume >= 0 ? n.phone_volume * 100 : 100.0);
     }
     fflush(stdout);
     return G_SOURCE_CONTINUE;

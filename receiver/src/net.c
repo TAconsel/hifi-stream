@@ -135,6 +135,7 @@ static void end_session_locked(void)
     if (N.have_session) {
         N.have_session = false;
         N.st.active = false;
+        N.st.phone_volume = -1;
         audio_close();
     }
 }
@@ -177,6 +178,7 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         N.session_start_ns = rx_ns;
         N.st.packets = N.st.bytes = N.st.lost = N.st.late = 0;
         N.win_start_ns = rx_ns; N.win_bytes = 0;
+        N.st.phone_volume = -1;
         N.jitter = 0; N.last_transit = 0;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &from->sin_addr, ip, sizeof(ip));
@@ -279,6 +281,17 @@ static void *rx_thread(void *arg)
         }
         if (len >= (ssize_t)strlen(HFS_DISCOVER_MSG) && memcmp(pkt, HFS_DISCOVER_MSG, strlen(HFS_DISCOVER_MSG)) == 0) {
             handle_discover(&from);
+            continue;
+        }
+        if (len >= (ssize_t)strlen(HFS_VOLUME_MSG) + 2 && memcmp(pkt, HFS_VOLUME_MSG, strlen(HFS_VOLUME_MSG)) == 0) {
+            pkt[len < (ssize_t)sizeof(pkt) ? len : (ssize_t)sizeof(pkt) - 1] = 0;
+            double v = atof((const char *)pkt + strlen(HFS_VOLUME_MSG));
+            if (v >= 0.0 && v <= 1.0) {
+                audio_set_phone_volume(v);
+                pthread_mutex_lock(&N.lock);
+                N.st.phone_volume = v;
+                pthread_mutex_unlock(&N.lock);
+            }
             continue;
         }
         if (len >= (ssize_t)strlen(HFS_BYE_MSG) && memcmp(pkt, HFS_BYE_MSG, strlen(HFS_BYE_MSG)) == 0) {

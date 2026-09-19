@@ -17,6 +17,7 @@ struct net_stats {
     double   bitrate_kbps;       /* averaged over the last second */
     double   jitter_ms;          /* RFC 3550 style inter-arrival jitter */
     double   session_seconds;
+    double   phone_volume;       /* 0..1 as forwarded by the phone, -1 when not forwarded */
     char     dump_path[200];     /* non-empty while dumping to a WAV file */
     uint64_t dump_frames;
 };

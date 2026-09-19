@@ -12,6 +12,7 @@ object StreamProtocol {
     const val DISCOVER = "HFS_DISCOVER"
     const val HERE = "HFS_HERE"
     const val BYE = "HFS_BYE"
+    const val VOLUME = "HFS_VOL"          // "HFS_VOL 0.63": phone media volume as a fraction 0..1
 
     enum class Format(val id: Int, val bytesPerSample: Int, val label: String) {
         S16(1, 2, "16-bit"),

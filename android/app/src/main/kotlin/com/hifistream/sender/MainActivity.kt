@@ -100,17 +100,36 @@ fun MainScreen() {
     var discovering by remember { mutableStateOf(false) }
     var discoverMessage by remember { mutableStateOf<String?>(null) }
     var testTone by remember { mutableStateOf(TestTone.playing) }
+    var systemMode by remember { mutableStateOf(settings.systemMode) }
+    var forwardVolume by remember { mutableStateOf(settings.forwardVolume) }
+    var privileged by remember { mutableStateOf(SystemCapture.isPrivileged(ctx)) }
+    var hasRoot by remember { mutableStateOf<Boolean?>(null) }
+    var moduleInstalled by remember { mutableStateOf<Boolean?>(null) }
+    var rootBusy by remember { mutableStateOf(false) }
+    var rootMessage by remember { mutableStateOf<String?>(null) }
+    var needsReboot by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val r = RootInstaller.hasRoot()
+            val m = if (r) RootInstaller.isModuleInstalled() else false
+            hasRoot = r; moduleInstalled = m
+        }
+    }
 
-    fun startService(resultCode: Int, data: Intent) {
+    fun startService(resultCode: Int, data: Intent?) {
         settings.host = host.trim()
         settings.port = port.toIntOrNull() ?: StreamProtocol.DEFAULT_PORT
         settings.rate = rate
         settings.format = format
         settings.mutePhone = mute
+        settings.systemMode = systemMode
+        settings.forwardVolume = forwardVolume
         val intent = Intent(ctx, CaptureService::class.java)
             .setAction(CaptureService.ACTION_START)
             .putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
             .putExtra(CaptureService.EXTRA_RESULT_DATA, data)
+            .putExtra(CaptureService.EXTRA_SYSTEM, systemMode && privileged)
+            .putExtra(CaptureService.EXTRA_FORWARD_VOLUME, forwardVolume)
             .putExtra(CaptureService.EXTRA_HOST, settings.host)
             .putExtra(CaptureService.EXTRA_PORT, settings.port)
             .putExtra(CaptureService.EXTRA_RATE, rate)
@@ -129,6 +148,10 @@ fun MainScreen() {
     }
 
     fun requestProjection() {
+        if (systemMode && privileged) {
+            startService(0, null)     // no consent dialog needed in system mode
+            return
+        }
         val mpm = ctx.getSystemService(MediaProjectionManager::class.java)
         val intent = if (Build.VERSION.SDK_INT >= 34) {
             // Whole-display config skips the "single app" chooser; audio capture is system-wide anyway.
@@ -274,6 +297,67 @@ fun MainScreen() {
                 }
             }
 
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("System mode (rooted phones)", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (privileged) "Installed as a privileged system app ✓ — media is routed to the PC like an external audio device: the phone stays silent, no screen-share prompt, volume keys control the stream."
+                        else "Installs a Magisk module that makes this app a privileged system app (CAPTURE_AUDIO_OUTPUT + MODIFY_AUDIO_ROUTING). Then audio is routed to the PC exclusively, like a connected audio device.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Use system mode")
+                            Text(if (privileged) "Exclusive routing, no consent dialog" else "Needs the system app install below",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        Switch(checked = systemMode && privileged, onCheckedChange = { systemMode = it },
+                            enabled = privileged && !StreamState.running)
+                    }
+                    if (privileged) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Forward phone volume to PC")
+                                Text("Volume keys set the receiver's volume; audio is sent at full scale",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            Switch(checked = forwardVolume, onCheckedChange = { forwardVolume = it }, enabled = !StreamState.running)
+                        }
+                    }
+                    when (hasRoot) {
+                        null -> Text("Checking root…", style = MaterialTheme.typography.bodySmall)
+                        false -> Text("No root access (Magisk) on this phone — system mode unavailable.",
+                            style = MaterialTheme.typography.bodySmall)
+                        true -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (moduleInstalled != true) {
+                                Button(enabled = !rootBusy, onClick = {
+                                    rootBusy = true; rootMessage = null
+                                    scope.launch {
+                                        val r = withContext(Dispatchers.IO) { RootInstaller.install(ctx) }
+                                        rootBusy = false
+                                        rootMessage = if (r.ok) "Module installed. Reboot to activate system mode." else "Install failed:\n${r.log}"
+                                        if (r.ok) { needsReboot = true; moduleInstalled = true }
+                                    }
+                                }) { Text("Install as system app") }
+                            } else {
+                                OutlinedButton(enabled = !rootBusy, onClick = {
+                                    rootBusy = true; rootMessage = null
+                                    scope.launch {
+                                        val r = withContext(Dispatchers.IO) { RootInstaller.uninstall() }
+                                        rootBusy = false
+                                        rootMessage = if (r.ok) "Module will be removed on the next reboot." else "Remove failed:\n${r.log}"
+                                        if (r.ok) { needsReboot = true; moduleInstalled = false }
+                                    }
+                                }) { Text("Remove system app") }
+                            }
+                            if (needsReboot) Button(onClick = { scope.launch { withContext(Dispatchers.IO) { RootInstaller.reboot() } } }) { Text("Reboot now") }
+                            if (rootBusy) CircularProgressIndicator(Modifier.width(20.dp).height(20.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                    rootMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+
             if (StreamState.running) {
                 Button(onClick = { onStop() }, modifier = Modifier.fillMaxWidth().height(56.dp)) { Text("Stop streaming") }
             } else {
@@ -312,6 +396,11 @@ fun StatusCard() {
                         (if (StreamState.readErrors > 0) " · ${StreamState.readErrors} errors" else ""),
                     style = MaterialTheme.typography.bodyMedium
                 )
+                if (StreamState.systemMode) {
+                    Text("System mode · exclusive routing" +
+                        (if (StreamState.phoneVolume >= 0f) " · phone volume ${(StreamState.phoneVolume * 100).toInt()} %" else ""),
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 when (StreamState.sourceBits) {
                     16 -> Text("Captured audio is 16-bit (Android's playback-capture limit on this phone)",
                         style = MaterialTheme.typography.bodySmall)

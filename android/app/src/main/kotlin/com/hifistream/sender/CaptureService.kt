@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -46,6 +48,10 @@ class CaptureService : Service() {
         const val EXTRA_RATE = "rate"
         const val EXTRA_FORMAT = "format"
         const val EXTRA_MUTE = "mute"
+        const val EXTRA_SYSTEM = "system"
+        const val EXTRA_FORWARD_VOLUME = "forwardVolume"
+        private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+        private const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
         private const val CHANNEL_ID = "streaming"
         private const val NOTIFICATION_ID = 1
         private const val CHANNELS = 2
@@ -74,6 +80,10 @@ class CaptureService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var savedVolume = -1
+    private var systemSession: SystemCapture.Session? = null
+    @Volatile private var phoneVolume = -1f          // fraction of max media volume, -1 = not forwarded
+    @Volatile private var volumeDirty = false
+    private var volumeReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -92,16 +102,22 @@ class CaptureService : Service() {
     private fun start(intent: Intent) {
         if (running) return
         createChannel()
+        val system = intent.getBooleanExtra(EXTRA_SYSTEM, false)
         // Android 14+ requires the mediaProjection foreground service to be up
         // before the projection token is turned into a MediaProjection.
         startForeground(NOTIFICATION_ID, buildNotification("Starting…"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            if (system) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
 
         val host = intent.getStringExtra(EXTRA_HOST) ?: ""
         val port = intent.getIntExtra(EXTRA_PORT, StreamProtocol.DEFAULT_PORT)
         val rate = intent.getIntExtra(EXTRA_RATE, 48000)
         val format = StreamProtocol.Format.fromId(intent.getIntExtra(EXTRA_FORMAT, StreamProtocol.Format.S24.id))
-        val mute = intent.getBooleanExtra(EXTRA_MUTE, true)
+        val mute = intent.getBooleanExtra(EXTRA_MUTE, true) && !system
+        if (system) {
+            startSystemMode(intent, host, port, rate, format)
+            return
+        }
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         @Suppress("DEPRECATION")
         val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
@@ -161,12 +177,43 @@ class CaptureService : Service() {
             return
         }
         record = rec
+        go(rec, host, port, rate, format, mute, system = false)
+    }
 
+    /**
+     * Privileged path: route media exclusively into a loop-back mix (no local
+     * playback, no consent dialog) and read it back. Float first, 16-bit if the
+     * remote-submix HAL refuses float.
+     */
+    private fun startSystemMode(intent: Intent, host: String, port: Int, rate: Int, format: StreamProtocol.Format) {
+        if (!SystemCapture.isPrivileged(this)) {
+            fail("System mode needs the app installed as a system app (see System mode card)")
+            return
+        }
+        val session = try {
+            SystemCapture.open(this, rate, AudioFormat.ENCODING_PCM_FLOAT)
+        } catch (e: Exception) {
+            Log.w(TAG, "float loop-back failed (${e.message}), trying 16-bit")
+            try {
+                SystemCapture.open(this, rate, AudioFormat.ENCODING_PCM_16BIT)
+            } catch (e2: Exception) {
+                fail("System capture failed: ${e2.message}")
+                return
+            }
+        }
+        systemSession = session
+        record = session.record
+        if (intent.getBooleanExtra(EXTRA_FORWARD_VOLUME, true)) startVolumeForwarding()
+        go(session.record, host, port, rate, format, mute = false, system = true)
+    }
+
+    private fun go(rec: AudioRecord, host: String, port: Int, rate: Int, format: StreamProtocol.Format, mute: Boolean, system: Boolean) {
         acquireLocks()
         if (mute) mutePhone()
 
         running = true
         StreamState.running = true
+        StreamState.systemMode = system
         StreamState.error = null
         StreamState.host = "$host:$port"
         StreamState.rate = rate
@@ -175,10 +222,42 @@ class CaptureService : Service() {
         StreamState.seconds = 0
         StreamState.readErrors = 0
         StreamState.sourceBits = 0
-        StreamState.status = "Streaming ${rate / 1000.0} kHz ${format.label}"
-        notify("Streaming to $host · ${rate / 1000.0} kHz ${format.label}")
+        StreamState.phoneVolume = phoneVolume
+        val modeLabel = if (system) "System" else "Streaming"
+        StreamState.status = "$modeLabel ${rate / 1000.0} kHz ${format.label}"
+        notify("Streaming to $host · ${rate / 1000.0} kHz ${format.label}" + if (system) " · system mode" else "")
 
         worker = Thread({ streamLoop(rec, host, port, rate, format) }, "hfs-capture").also { it.start() }
+    }
+
+    // ---- phone volume → receiver ----------------------------------------------
+
+    private fun readPhoneVolume(): Float {
+        val am = getSystemService(AudioManager::class.java)
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        return if (max > 0) am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max else 1f
+    }
+
+    private fun startVolumeForwarding() {
+        phoneVolume = readPhoneVolume()
+        volumeDirty = true
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1) != AudioManager.STREAM_MUSIC) return
+                phoneVolume = readPhoneVolume()
+                volumeDirty = true
+                StreamState.phoneVolume = phoneVolume
+            }
+        }
+        registerReceiver(r, IntentFilter(VOLUME_CHANGED_ACTION))
+        volumeReceiver = r
+    }
+
+    private fun stopVolumeForwarding() {
+        volumeReceiver?.let { unregisterReceiver(it) }
+        volumeReceiver = null
+        phoneVolume = -1f
+        StreamState.phoneVolume = -1f
     }
 
     private fun streamLoop(rec: AudioRecord, host: String, port: Int, rate: Int, format: StreamProtocol.Format) {
@@ -186,6 +265,7 @@ class CaptureService : Service() {
         val framesPerPacket = StreamProtocol.framesPerPacket(rate, CHANNELS, format)
         mainHandler.post { StreamState.framesPerPacket = framesPerPacket }
         val samples = FloatArray(framesPerPacket * CHANNELS)
+        val shorts = if (rec.audioFormat == AudioFormat.ENCODING_PCM_16BIT) ShortArray(samples.size) else null
         val buf = ByteBuffer.allocate(StreamProtocol.HEADER_SIZE + samples.size * format.bytesPerSample)
             .order(ByteOrder.LITTLE_ENDIAN)
         val socket: DatagramSocket
@@ -217,8 +297,15 @@ class CaptureService : Service() {
             return
         }
         try {
+            var lastVolMs = 0L
             while (running) {
-                val n = rec.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
+                val n = if (shorts != null) {
+                    val m = rec.read(shorts, 0, shorts.size, AudioRecord.READ_BLOCKING)
+                    for (i in 0 until maxOf(m, 0)) samples[i] = shorts[i] / 32768f
+                    m
+                } else {
+                    rec.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
+                }
                 if (n <= 0) {
                     readErrors++
                     if (n < 0) {
@@ -259,6 +346,16 @@ class CaptureService : Service() {
                 windowBytes += buf.position()
 
                 val now = SystemClock.elapsedRealtime()
+                val vol = phoneVolume
+                if (vol >= 0f && (volumeDirty || now - lastVolMs >= 1000)) {
+                    volumeDirty = false
+                    lastVolMs = now
+                    try {
+                        val msg = "${StreamProtocol.VOLUME} %.4f".format(java.util.Locale.ROOT, vol).toByteArray()
+                        socket.send(DatagramPacket(msg, msg.size, address, port))
+                    } catch (_: Exception) {
+                    }
+                }
                 if (now - lastStatMs >= 500) {
                     val kbps = windowBytes * 8.0 / (now - lastStatMs)
                     val p = packets; val e = readErrors; val secs = (now - startMs) / 1000
@@ -292,6 +389,12 @@ class CaptureService : Service() {
             }
         }
         worker = null
+        stopVolumeForwarding()
+        systemSession?.let {
+            it.close()          // stops/releases the record and unregisters the policy
+            systemSession = null
+            record = null
+        }
         record?.let {
             try {
                 it.stop()
@@ -302,6 +405,7 @@ class CaptureService : Service() {
         record = null
         projection?.stop()
         projection = null
+        StreamState.systemMode = false
         restoreVolume()
         releaseLocks()
         StreamState.running = false
