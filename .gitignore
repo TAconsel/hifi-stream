@@ -1,0 +1,4 @@
+receiver/*.o
+receiver/src/*.o
+receiver/hifistream-receiver
+*.wav
