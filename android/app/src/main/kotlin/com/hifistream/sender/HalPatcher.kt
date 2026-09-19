@@ -17,7 +17,7 @@ import java.io.File
  * AArch64 builds are recognised by instruction pattern, and the patch refuses to
  * run unless exactly two sites are found.
  *
- * The patched copy is placed in the Magisk module (system/vendor/lib*/hw), so
+ * The patched copy is placed in the Magisk module (under system/vendor/lib.../hw), so
  * the real /vendor is never written and "Remove system app" restores everything.
  */
 object HalPatcher {
