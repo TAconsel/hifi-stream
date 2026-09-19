@@ -263,15 +263,34 @@ class CaptureService : Service() {
         // when streaming stops, and the keys start from where they were last time.
         val am = getSystemService(AudioManager::class.java)
         val settings = Settings(this)
+        var applyingStreamLevel = false
         try {
             val current = am.getStreamVolume(AudioManager.STREAM_MUSIC)
             savedVolume = if (settings.savedVolume >= 0) settings.savedVolume else current
             settings.savedVolume = savedVolume
             val sv = settings.streamVolume
-            if (sv >= 0 && sv != current) am.setStreamVolume(AudioManager.STREAM_MUSIC, sv, 0)
+            if (sv >= 0 && sv != current) {
+                // The loop-back route was just requested; let it take hold before the
+                // level changes, so the speaker never plays at the streaming level.
+                applyingStreamLevel = true
+                mainHandler.postDelayed({
+                    applyingStreamLevel = false
+                    if (!running || volumeReceiver == null) return@postDelayed
+                    try {
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, sv, 0)
+                    } catch (_: Exception) {
+                    }
+                    phoneVolume = readPhoneVolume()
+                    volumeDirty = true
+                    StreamState.phoneVolume = phoneVolume
+                }, 400)
+            }
         } catch (_: Exception) {
         }
-        phoneVolume = readPhoneVolume()
+        // Until the streaming level is applied, the receiver plays at that level too,
+        // not at the speaker level the media volume still holds.
+        phoneVolume = settings.streamVolume.takeIf { applyingStreamLevel && it >= 0 }
+            ?.let { it.toFloat() / am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) } ?: readPhoneVolume()
         volumeDirty = true
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -312,10 +331,24 @@ class CaptureService : Service() {
             return
         }
 
-        rec.startRecording()
-        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            mainHandler.post { fail("Capture did not start (is another app capturing?)") }
-            return
+        // After an unclean end of a previous session (app killed while streaming) the
+        // audio server can still hold the old loop-back client for a moment: retry.
+        var attempts = 0
+        while (true) {
+            rec.startRecording()
+            if (rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) break
+            if (++attempts >= 5) {
+                mainHandler.post { fail("Capture did not start (is another app capturing?)") }
+                return
+            }
+            try {
+                rec.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                Thread.sleep(300)
+            } catch (_: InterruptedException) {
+            }
         }
 
         // Capture is split in two: a reader that only drains AudioRecord (so its blocking
@@ -531,6 +564,14 @@ class CaptureService : Service() {
         worker = null
         stopVolumeForwarding()
         systemSession?.let {
+            // Put the speaker volume back *while* the loop-back still owns the media
+            // players, and give AudioService a moment to apply it; otherwise the
+            // speaker plays at the streaming level between the two steps.
+            restoreVolume()
+            try {
+                Thread.sleep(150)
+            } catch (_: InterruptedException) {
+            }
             it.close()          // stops/releases the record and unregisters the policy
             systemSession = null
             record = null
