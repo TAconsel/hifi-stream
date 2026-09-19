@@ -106,30 +106,36 @@ object HalPatcher {
     private fun u32(b: ByteArray, o: Int) = u16(b, o).toLong() or (u16(b, o + 2).toLong() shl 16)
 
     private fun patchAArch64(b: ByteArray): String {
-        val sites = ArrayList<Int>()
+        // Format sanitise sites: "mov w8, #1" followed within four instructions by
+        // "str w8, [xN, #8]" (the config->format = PCM_16_BIT store). The register
+        // xN differs between the output (x21) and input (x23) paths, so it is masked
+        // out; the #8 offset and the w8 source are fixed.
+        val fmt = ArrayList<Int>()
         var i = 0
-        while (i + 16 <= b.size) {
+        while (i + 20 <= b.size) {
             if (u32(b, i) == 0x52800028L) {               // mov w8, #1
                 var strFound = false
-                for (k in 1..4) if ((u32(b, i + 4 * k) and 0xFFFFFC1FL) == 0xB9000A08L) strFound = true  // str w8,[xN,#8]
-                if (strFound && hasWithin(b, i - 0x100, i, MOV_W8_48000)) sites.add(i)
+                for (k in 1..4) if ((u32(b, i + 4 * k) and 0xFFFFFC1FL) == 0xB9000808L) strFound = true  // str w8,[xN,#8]
+                if (strFound) fmt.add(i)
             }
             i += 4
         }
-        if (sites.size != 2) throw IllegalStateException("expected 2 sanitise sites, found ${sites.size} — unknown HAL build, not patched")
-        var nops = 0
-        for (s in sites) {
-            b[s] = 0xA8.toByte()                           // mov w8, #5
-            var p = maxOf(0, s - 0x100)
-            while (p + 4 <= s) {
-                if (matches(b, p, MOV_W8_48000)) { NOP_A64.copyInto(b, p); nops++ }
-                p += 4
-            }
+        if (fmt.size != 2) throw IllegalStateException("expected 2 format sites, found ${fmt.size} — unknown HAL build, not patched")
+        // Rate fall-backs: the unconditional "mov w8, #48000" that overwrites the
+        // requested rate. On the input path it sits *after* the format store, so it
+        // is matched independently of the format sites rather than by proximity.
+        val rate = ArrayList<Int>()
+        i = 0
+        while (i + 4 <= b.size) {
+            if (u32(b, i) == 0x52977008L) rate.add(i)      // mov w8, #48000
+            i += 4
         }
-        return "AArch64: 2 format sites, $nops rate fall-backs patched"
+        if (rate.size != 2) throw IllegalStateException("expected 2 rate fall-backs, found ${rate.size} — unknown HAL build, not patched")
+        for (s in fmt) b[s] = 0xA8.toByte()               // mov w8, #1 -> mov w8, #5 (PCM_FLOAT)
+        for (s in rate) NOP_A64.copyInto(b, s)            // keep the requested sample rate
+        return "AArch64: 2 format sites, 2 rate fall-backs patched"
     }
 
-    private val MOV_W8_48000 = byteArrayOf(0x08, 0x70, 0x97.toByte(), 0x52)
     private val NOP_A64 = byteArrayOf(0x1F, 0x20, 0x03, 0xD5.toByte())
 
     private fun matches(b: ByteArray, o: Int, pat: ByteArray): Boolean {
