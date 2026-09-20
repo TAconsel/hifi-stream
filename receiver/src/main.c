@@ -286,6 +286,9 @@ static void settings_load(void)
         int port = g_key_file_get_integer(kf, "receiver", "port", &e);
         if (!e && port > 0 && port < 65536) opt.port = port;
         g_clear_error(&e);
+        gchar *target = g_key_file_get_string(kf, "receiver", "target", &e);
+        if (!e && target && *target && !opt.target) opt.target = target;   /* PipeWire sink to play to */
+        g_clear_error(&e);
     }
     g_key_file_free(kf);
     g_free(path);
@@ -301,6 +304,8 @@ static void settings_save(void)
     g_key_file_set_double(kf, "receiver", "buffer_ms", audio_get_target_ms());
     g_key_file_set_boolean(kf, "receiver", "remote_rate", audio_get_remote_rate());
     g_key_file_set_integer(kf, "receiver", "port", opt.port);
+    if (opt.target)
+        g_key_file_set_string(kf, "receiver", "target", opt.target);
     g_key_file_save_to_file(kf, path, NULL);
     g_key_file_free(kf);
     g_free(dir);
