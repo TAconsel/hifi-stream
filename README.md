@@ -4,8 +4,9 @@
 [Releases page](https://github.com/TAconsel/hifi-stream/releases) has
 `HiFiStream-<version>.apk` for the phone (sideload; Android 10+) and
 `hifistream-receiver-<version>-linux-x86_64.tar.gz` for the PC (unpack,
-`./install.sh`; needs PipeWire and GTK 4). Building from source: see
-"Building" below.
+`./install.sh`; needs PipeWire and GTK 4). Building from source: "Receiver
+(PC)" below; `android/` is a standard Gradle project (`./gradlew
+assembleDebug`, or `assembleRelease` with a git-ignored `keystore.properties`).
 
 Streams everything an Android phone plays to a Linux PC over Wi-Fi as raw,
 lossless PCM with ~30 ms of added latency. No root needed on the phone: the
