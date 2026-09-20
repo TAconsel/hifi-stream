@@ -22,6 +22,7 @@ object StreamState {
     var latePackets by mutableStateOf(0L)         // sent > 4 ms after they were due
     var resent by mutableStateOf(0L)              // packets resent on the receiver's request
     var linkBars by mutableStateOf(0)             // receiver-reported link quality, 0..4
+    var rateActuator by mutableStateOf("")        // "clock" / "resample" / "" while nothing is requested
     var linkSummary by mutableStateOf("")         // the receiver's last report, human readable
     var host by mutableStateOf("")
     var deviceName by mutableStateOf("")   // name of the saved device being streamed to
@@ -67,6 +68,11 @@ class Settings(context: Context) {
     var forwardVolume: Boolean
         get() = prefs.getBoolean("forwardVolume", true)
         set(v) = prefs.edit().putBoolean("forwardVolume", v).apply()
+
+    /** Lossless rate matching by trimming the phone's clock (root) instead of resampling. */
+    var clockSteer: Boolean
+        get() = prefs.getBoolean("clockSteer", true)
+        set(v) = prefs.edit().putBoolean("clockSteer", v).apply()
 
     /** The device the tile starts and the host/port/rate/format above mirror. */
     var lastDeviceId: String

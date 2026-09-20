@@ -71,9 +71,11 @@ report (none for 3 s) as "receiver not playing".
 (optional; 0 or absent when the receiver resamples locally). It is meant for
 receivers without the CPU for a resampler, such as microcontrollers: run a slow
 loop on your buffer fill (the PC receiver uses a critically damped PI on the
-average fill, ±3000 ppm limit) and send the result; the phone then resamples
-its capture with a windowed-sinc so that it produces `1 / (1 + rate_ppm·1e-6)`
-output frames per captured frame. Positive = your buffer is running long, you
+average fill, ±3000 ppm limit) and send the result; the phone then produces
+`1 / (1 + rate_ppm·1e-6)` output frames per second of receiver time — by
+trimming its own clock when it can (system mode, root: nothing is resampled,
+the whole phone follows your clock) or with a windowed-sinc resampler
+otherwise. Positive = your buffer is running long, you
 will receive fewer frames per second. Update it once a second; the phone slews
 to a new value gently, and treats a missing report as 0.
 

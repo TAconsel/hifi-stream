@@ -367,6 +367,8 @@ class CaptureService : Service() {
         // resampled here so a receiver without a resampler still stays in sync. Output
         // frames are collected in a small FIFO and packetised from there.
         val vari = Varispeed(CHANNELS)
+        val steerClock = StreamState.systemMode && Settings(this).clockSteer && ClockSteer.probe()
+        StreamState.rateActuator = if (steerClock) "clock" else "resample"
         val vout = FloatArray(samples.size * 3)
         val fifo = FloatArray(samples.size * 8)
         var fifoLen = 0
@@ -392,7 +394,15 @@ class CaptureService : Service() {
                 while (fifoLen < samples.size) {
                     if (!ring.take(samples, samples.size, 200)) break
                     if (fifoLen == 0) packetInputPos = inputPos
-                    vari.request(LinkHealth.ratePpm)
+                    // The receiver's rate request goes to the clock trim when we can (lossless),
+                    // to the resampler otherwise.
+                    val ppm = LinkHealth.ratePpm
+                    if (steerClock) {
+                        ClockSteer.request(-ppm)         // it wants fewer frames → run the phone slower
+                        vari.request(0.0)
+                    } else {
+                        vari.request(ppm)
+                    }
                     val n = if (vari.active) vari.process(samples, samples.size, vout) else {
                         System.arraycopy(samples, 0, vout, 0, samples.size); samples.size
                     }
@@ -475,6 +485,7 @@ class CaptureService : Service() {
             } catch (_: Exception) {
             }
             socket.close()          // also unblocks the NACK thread
+            StreamState.rateActuator = ""
             try {
                 nackThread.join(1000)
             } catch (_: InterruptedException) {
@@ -592,6 +603,7 @@ class CaptureService : Service() {
             }
         }
         worker = null
+        ClockSteer.release()
         stopVolumeForwarding()
         systemSession?.let {
             // Put the speaker volume back *while* the loop-back still owns the media

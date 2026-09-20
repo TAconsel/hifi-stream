@@ -66,5 +66,6 @@ object LinkHealth {
 
     fun summary(): String = if (!reporting) "no report from receiver" else
         "PC: jitter %.1f ms · buffer %.0f ms · %d lost · %d recovered · %d dropouts".format(jitterMs, bufferMs, lost, recovered, underruns) +
-            (if (ratePpm != 0.0) " · rate %+.0f ppm on phone".format(ratePpm) else "")
+            (if (ratePpm != 0.0) " · rate %+.0f ppm by %s".format(ratePpm,
+                if (StreamState.rateActuator == "clock") "clock trim (lossless)" else "resampler") else "")
 }

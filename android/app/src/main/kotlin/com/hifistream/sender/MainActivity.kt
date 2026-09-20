@@ -553,6 +553,15 @@ private fun AppSettingsScreen(onBack: () -> Unit) {
                             enabled = privileged && !StreamState.running)
                     }
                     if (privileged) {
+                        var clockSteer by remember { mutableStateOf(settings.clockSteer) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Lossless rate matching (clock trim)")
+                                Text("When the receiver asks for a rate correction, trim the phone's clock by that many ppm (adjtimex, root) so the whole audio pipeline follows the receiver's clock — no resampling anywhere. Off: resample on the phone instead. Takes effect at the next start.",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            Switch(checked = clockSteer, onCheckedChange = { clockSteer = it; settings.clockSteer = it })
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("Quick Settings tile")

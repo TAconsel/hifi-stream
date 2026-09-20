@@ -65,10 +65,19 @@ writes exactly what arrives, which is how the numbers below were verified.
   gross errors (> 20 ms), rate-limited to a 0.5 % tempo change.
 * **Rate matching on the phone** (`--remote-rate`, or the check box): the
   receiver never resamples and instead sends the correction it wants in its
-  once-a-second report; the phone resamples its capture with a 32-tap
-  windowed-sinc (worst spur −110 dB, noise floor at the numerical bottom).
-  This is the mode for a microcontroller receiver, which only has to run the
-  slow fill loop and send one number — see PROTOCOL.md, "Receiver report".
+  once-a-second report. This is the mode for a microcontroller receiver,
+  which only has to run the slow fill loop and send one number — see
+  PROTOCOL.md, "Receiver report". The phone applies it in one of two ways:
+  * **Clock trim — lossless** (system mode, root, default): the phone trims
+    its kernel clock by that many ppm (`adjtimex`). Android's remote-submix
+    pipe and mixer are timed by kernel sleeps, so the whole media pipeline —
+    every app's playback — then runs at the receiver's clock; not a single
+    sample is resampled anywhere. Measured: a +400 ppm trim moves the
+    captured rate by +400 ppm within seconds. The wall clock drifts by the
+    trim while streaming (seconds per hour at most) and the accumulated
+    offset is slewed back out on stop.
+  * **Resampler** (fallback without root): a 32-tap windowed-sinc varispeed
+    (worst spur −110 dB, noise floor at the numerical bottom).
 * Lost packets become silence of the right length so timing is preserved, and
   are requested again from the phone at once (NACK, see PROTOCOL.md); a resend
   that lands before the spot is played replaces the silence. With 2 % random

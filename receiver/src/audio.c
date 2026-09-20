@@ -324,10 +324,15 @@ static void render(float *dst, int n)
         if (err_s > lim) err_s = lim;
         if (err_s < -lim) err_s = -lim;
         double dt = (double)n / rate;
-        double corr = 1.0 + RATE_KP * err_s + A.rate_integ;
+        /* A remote actuator (the phone trimming its clock, reported once a
+         * second) answers with a few seconds of lag: softer gains keep the
+         * loop critically damped there too. */
+        double kp = atomic_load(&A.remote_rate) ? RATE_KP / 2.5 : RATE_KP;
+        double ki = kp * kp / 4.0;
+        double corr = 1.0 + kp * err_s + A.rate_integ;
         if (corr > 1.0 + RATE_CORR_MAX) corr = 1.0 + RATE_CORR_MAX;
         else if (corr < 1.0 - RATE_CORR_MAX) corr = 1.0 - RATE_CORR_MAX;
-        else A.rate_integ += RATE_KI * err_s * dt;   /* anti-windup: only integrate inside the limits */
+        else A.rate_integ += ki * err_s * dt;        /* anti-windup: only integrate inside the limits */
         if (fabs(corr - A.rate_corr) > 1e-6) {
             /* Applied by the loop timer: controls cannot be set from the RT thread. */
             A.rate_corr = corr;
