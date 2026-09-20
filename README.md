@@ -72,9 +72,16 @@ writes exactly what arrives, which is how the numbers below were verified.
 
 ## Android app
 
-* In system mode a **Quick Settings tile** starts and stops streaming from the
-  notification shade with the saved settings ("Add tile" in the app, or the
-  shade's edit button), and the status-bar icon on the left shows the link
+* Receivers are **saved devices**, like paired Bluetooth devices: the main
+  screen lists them, a tap streams to one (tap again to stop), the gear opens
+  that device's own settings (name, address, sample rate, bit depth, volume
+  handling), "Add device" scans the Wi-Fi for receivers or takes an address.
+  The app's own settings (system mode, root install, HAL patch, test tone) are
+  behind the gear in the top bar.
+* In system mode a **Quick Settings tile** starts and stops streaming to the
+  last device from the notification shade; long-press opens the device list
+  ("Add tile" in the app, or the shade's edit button). The status-bar icon
+  on the left shows the link
   quality as bars while streaming — from the receiver's own once-a-second
   report (dropouts, losses, resends, jitter), not from Wi-Fi signal strength,
   so 0 bars means the PC is not playing what is sent.

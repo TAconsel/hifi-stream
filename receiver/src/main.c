@@ -17,6 +17,7 @@ static struct {
     gboolean force_rate;
     char    *dump;
     char    *target;
+    int      log_secs;
 } opt = { .port = HFS_DEFAULT_PORT, .buffer_ms = 20.0, .quantum = 256 };
 
 static const GOptionEntry entries[] = {
@@ -27,6 +28,7 @@ static const GOptionEntry entries[] = {
     { "force-rate", 0,   0, G_OPTION_ARG_NONE,   &opt.force_rate, "Force the PipeWire graph rate to follow the stream", NULL },
     { "dump",       'd', 0, G_OPTION_ARG_STRING, &opt.dump,       "Also write the received audio to a float WAV file", "FILE" },
     { "headless",   0,   0, G_OPTION_ARG_NONE,   &opt.headless,   "No window; print statistics to stdout", NULL },
+    { "log",        'l', 0, G_OPTION_ARG_INT,    &opt.log_secs,   "Also print a statistics line to stderr every N seconds", "N" },
     { NULL }
 };
 
@@ -143,6 +145,27 @@ static gboolean refresh(gpointer data)
     net_get_stats(&n);
     audio_get_stats(&a);
     char buf[256];
+
+    /* Periodic statistics line on stderr for long unattended runs. */
+    static gint64 last_log_us;
+    if (opt.log_secs > 0 && n.active) {
+        gint64 now_us = g_get_monotonic_time();
+        if (now_us - last_log_us >= (gint64)opt.log_secs * G_USEC_PER_SEC) {
+            last_log_us = now_us;
+            GDateTime *t = g_date_time_new_now_local();
+            gchar *ts = g_date_time_format(t, "%H:%M:%S");
+            fprintf(stderr, "%s stat pkts %" G_GUINT64_FORMAT " lost %" G_GUINT64_FORMAT " recovered %" G_GUINT64_FORMAT
+                    " late %" G_GUINT64_FORMAT " | jit %.2f ms | buf avg %.1f min %.1f ms | drop %" G_GUINT64_FORMAT
+                    " ins %" G_GUINT64_FORMAT " resync %" G_GUINT64_FORMAT " under %" G_GUINT64_FORMAT
+                    " | rate %+.0f ppm | dev %.1f ms\n",
+                    ts, n.packets, n.lost, n.recovered, n.late, n.jitter_ms,
+                    a.cfg.rate ? 1000.0 * a.avg_fill_frames / a.cfg.rate : 0.0,
+                    a.cfg.rate ? 1000.0 * a.min_fill_frames / a.cfg.rate : 0.0,
+                    a.drops, a.inserts, a.resyncs, a.underruns, (a.rate_corr - 1.0) * 1e6, a.device_delay_ms);
+            g_free(ts);
+            g_date_time_unref(t);
+        }
+    }
 
     /* Event log on stderr, so a dropout can be matched to a cause afterwards. */
     static guint64 last_under, last_resync, last_lost;

@@ -598,6 +598,7 @@ class CaptureService : Service() {
         StreamState.running = false
         StreamState.status = reason
         StreamState.kbps = 0.0
+        StreamState.deviceName = ""
         StreamTileService.requestUpdate(this)
     }
 

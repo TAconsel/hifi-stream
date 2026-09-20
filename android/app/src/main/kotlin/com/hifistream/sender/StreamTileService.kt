@@ -25,8 +25,10 @@ class StreamTileService : TileService() {
         val settings = Settings(this)
         when {
             StreamState.running -> startForegroundService(CaptureService.stopIntent(this))
-            settings.systemMode && SystemCapture.isPrivileged(this) && settings.host.isNotBlank() ->
+            settings.systemMode && SystemCapture.isPrivileged(this) && settings.host.isNotBlank() -> {
+                StreamState.deviceName = DeviceStore(this).selected()?.name ?: ""
                 startForegroundService(CaptureService.systemStartIntent(this, settings))
+            }
             else -> {
                 val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 @Suppress("DEPRECATION")
@@ -49,9 +51,10 @@ class StreamTileService : TileService() {
         tile.icon = Icon.createWithResource(this, if (running) R.drawable.ic_signal_4 else R.drawable.ic_stat_stream)
         tile.label = getString(R.string.app_name)
         if (Build.VERSION.SDK_INT >= 29) {
+            val last = DeviceStore(this).selected()
             tile.subtitle = when {
-                running -> StreamState.host.ifBlank { "Streaming" }
-                settings.systemMode && SystemCapture.isPrivileged(this) && settings.host.isNotBlank() -> "→ ${settings.host}"
+                running -> StreamState.deviceName.ifBlank { StreamState.host.ifBlank { "Streaming" } }
+                settings.systemMode && SystemCapture.isPrivileged(this) && last != null -> last.name
                 else -> "Open to start"
             }
         }

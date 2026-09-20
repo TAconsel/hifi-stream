@@ -24,6 +24,7 @@ object StreamState {
     var linkBars by mutableStateOf(0)             // receiver-reported link quality, 0..4
     var linkSummary by mutableStateOf("")         // the receiver's last report, human readable
     var host by mutableStateOf("")
+    var deviceName by mutableStateOf("")   // name of the saved device being streamed to
     var rate by mutableStateOf(0)
     var systemMode by mutableStateOf(false)
     var phoneVolume by mutableStateOf(-1f)
@@ -66,6 +67,11 @@ class Settings(context: Context) {
     var forwardVolume: Boolean
         get() = prefs.getBoolean("forwardVolume", true)
         set(v) = prefs.edit().putBoolean("forwardVolume", v).apply()
+
+    /** The device the tile starts and the host/port/rate/format above mirror. */
+    var lastDeviceId: String
+        get() = prefs.getString("lastDeviceId", "") ?: ""
+        set(v) = prefs.edit().putString("lastDeviceId", v).apply()
 
     var mutePhone: Boolean
         get() = prefs.getBoolean("mute", true)
