@@ -1,5 +1,12 @@
 # HiFi Stream
 
+**Download:** the latest release on the
+[Releases page](https://github.com/TAconsel/hifi-stream/releases) has
+`HiFiStream-<version>.apk` for the phone (sideload; Android 10+) and
+`hifistream-receiver-<version>-linux-x86_64.tar.gz` for the PC (unpack,
+`./install.sh`; needs PipeWire and GTK 4). Building from source: see
+"Building" below.
+
 Streams everything an Android phone plays to a Linux PC over Wi-Fi as raw,
 lossless PCM with ~30 ms of added latency. No root needed on the phone: the
 app uses Android's `AudioPlaybackCapture` API, the same mechanism

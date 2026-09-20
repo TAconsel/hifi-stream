@@ -2,3 +2,7 @@ receiver/*.o
 receiver/src/*.o
 receiver/hifistream-receiver
 *.wav
+*.log
+*.pcap
+android/keystore.properties
+*.jks
