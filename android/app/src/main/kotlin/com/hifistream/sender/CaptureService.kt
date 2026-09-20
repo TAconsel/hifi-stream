@@ -545,7 +545,11 @@ class CaptureService : Service() {
         val shorts = if (rec.audioFormat == AudioFormat.ENCODING_PCM_16BIT) ShortArray(samples.size) else null
         val head = framesPerRead * CHANNELS
         var framePos = 0L
-        var analysed = 0L          // non-zero samples inspected for the source resolution
+        // Source resolution, re-evaluated over every 2 s of non-silent audio: a sample not on
+        // the 16-bit grid means the app (or Android's mixer/resampler) produced more than 16
+        // bits; a whole window exactly on the grid means the app is sending 16-bit samples at
+        // the pipe's rate (e.g. Tidal, whose Android player outputs 16-bit PCM).
+        var analysed = 0L          // non-zero samples inspected in the current window
         var hiRes = false
         fun read(offset: Int, count: Int, mode: Int): Int =
             if (shorts != null) {
@@ -576,20 +580,20 @@ class CaptureService : Service() {
             clock.onRead(framePos, frames, blockedUs)
             framePos += frames
             ring.put(samples, n)
-            if (!hiRes && analysed < rate * 4L) {
-                // Android's playback capture is 16-bit on most devices: detect whether
-                // any sample carries more than 16 bits so the UI can say so honestly.
-                for (i in 0 until n) {
-                    val v = samples[i]
-                    if (v == 0f) continue
-                    analysed++
+            for (i in 0 until n) {
+                val v = samples[i]
+                if (v == 0f) continue
+                analysed++
+                if (!hiRes) {
                     val scaled = v * 32768f
-                    if (scaled != Math.round(scaled).toFloat()) { hiRes = true; break }
+                    if (scaled != Math.round(scaled).toFloat()) hiRes = true
                 }
-                if (hiRes || analysed >= rate * 4L) {
-                    val bits = if (hiRes) 24 else 16
-                    mainHandler.post { StreamState.sourceBits = bits }
-                }
+            }
+            if (analysed >= rate * 2L) {
+                val bits = if (hiRes) 24 else 16
+                if (bits != StreamState.sourceBits) mainHandler.post { StreamState.sourceBits = bits }
+                analysed = 0
+                hiRes = false
             }
         }
     }

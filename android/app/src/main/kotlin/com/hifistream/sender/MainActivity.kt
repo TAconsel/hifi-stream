@@ -703,10 +703,13 @@ private fun StatusCard(onStop: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall)
                 }
                 when (StreamState.sourceBits) {
-                    16 -> Text("Captured audio is 16-bit (Android's playback-capture limit on this phone)",
+                    16 -> Text(
+                        if (StreamState.systemMode) "Audio is 16-bit right now: the playing app hands Android 16-bit samples at the stream rate (Tidal's Android player does this); the stream itself is untouched"
+                        else "Captured audio is 16-bit (Android's playback-capture limit on this phone)",
                         style = MaterialTheme.typography.bodySmall)
-                    24 -> Text("Captured audio carries more than 16 bits" +
-                        (if (StreamState.rate != 48000) " (includes Android's resampling)" else ""),
+                    24 -> Text("Audio carries more than 16 bits right now" +
+                        (if (StreamState.systemMode) " (a hi-res source, or a 16-bit track resampled to ${StreamState.rate / 1000.0} kHz by Android's mixer)"
+                         else if (StreamState.rate != 48000) " (includes Android's resampling)" else ""),
                         style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(4.dp))
