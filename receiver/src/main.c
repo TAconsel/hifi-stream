@@ -16,10 +16,11 @@ static struct {
     gboolean headless;
     gboolean force_rate;
     gboolean remote_rate;
+    gboolean local_rate;
     char    *dump;
     char    *target;
     int      log_secs;
-} opt = { .port = HFS_DEFAULT_PORT, .buffer_ms = 20.0, .quantum = 256 };
+} opt = { .port = HFS_DEFAULT_PORT, .buffer_ms = 20.0, .quantum = 256, .remote_rate = TRUE };
 
 static const GOptionEntry entries[] = {
     { "port",       'p', 0, G_OPTION_ARG_INT,    &opt.port,       "UDP port to listen on (default 47100)", "PORT" },
@@ -27,7 +28,8 @@ static const GOptionEntry entries[] = {
     { "quantum",    'q', 0, G_OPTION_ARG_INT,    &opt.quantum,    "Requested PipeWire quantum in frames (default 256)", "FRAMES" },
     { "target",     't', 0, G_OPTION_ARG_STRING, &opt.target,     "PipeWire sink to play to (node name or id)", "NODE" },
     { "force-rate", 0,   0, G_OPTION_ARG_NONE,   &opt.force_rate, "Force the PipeWire graph rate to follow the stream", NULL },
-    { "remote-rate", 0,  0, G_OPTION_ARG_NONE,   &opt.remote_rate, "Rate matching on the phone: never resample here, send the correction in HFS_RX", NULL },
+    { "remote-rate", 0,  0, G_OPTION_ARG_NONE,   &opt.remote_rate, "Rate matching on the phone: never resample here, send the correction in HFS_RX (default)", NULL },
+    { "local-rate",  0,  0, G_OPTION_ARG_NONE,   &opt.local_rate,  "Rate matching here with PipeWire's resampler instead", NULL },
     { "dump",       'd', 0, G_OPTION_ARG_STRING, &opt.dump,       "Also write the received audio to a float WAV file", "FILE" },
     { "headless",   0,   0, G_OPTION_ARG_NONE,   &opt.headless,   "No window; print statistics to stdout", NULL },
     { "log",        'l', 0, G_OPTION_ARG_INT,    &opt.log_secs,   "Also print a statistics line to stderr every N seconds", "N" },
@@ -261,16 +263,62 @@ static gboolean refresh(gpointer data)
     return G_SOURCE_CONTINUE;
 }
 
+/* ---- settings file ---------------------------------------------------------- */
+
+static gchar *settings_path(void)
+{
+    return g_build_filename(g_get_user_config_dir(), "hifistream", "receiver.conf", NULL);
+}
+
+/* Reads the saved settings into opt; command-line options override them afterwards. */
+static void settings_load(void)
+{
+    gchar *path = settings_path();
+    GKeyFile *kf = g_key_file_new();
+    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+        GError *e = NULL;
+        double b = g_key_file_get_double(kf, "receiver", "buffer_ms", &e);
+        if (!e && b >= 2 && b <= 100) opt.buffer_ms = b;
+        g_clear_error(&e);
+        gboolean r = g_key_file_get_boolean(kf, "receiver", "remote_rate", &e);
+        if (!e) opt.remote_rate = r;
+        g_clear_error(&e);
+        int port = g_key_file_get_integer(kf, "receiver", "port", &e);
+        if (!e && port > 0 && port < 65536) opt.port = port;
+        g_clear_error(&e);
+    }
+    g_key_file_free(kf);
+    g_free(path);
+}
+
+static void settings_save(void)
+{
+    gchar *path = settings_path();
+    gchar *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_load_from_file(kf, path, G_KEY_FILE_KEEP_COMMENTS, NULL);
+    g_key_file_set_double(kf, "receiver", "buffer_ms", audio_get_target_ms());
+    g_key_file_set_boolean(kf, "receiver", "remote_rate", audio_get_remote_rate());
+    g_key_file_set_integer(kf, "receiver", "port", opt.port);
+    g_key_file_save_to_file(kf, path, NULL);
+    g_key_file_free(kf);
+    g_free(dir);
+    g_free(path);
+}
+
 static void on_remote_rate_toggled(GtkCheckButton *b, gpointer data)
 {
     (void)data;
     audio_set_remote_rate(gtk_check_button_get_active(b));
+    settings_save();
 }
 
 static void on_scale_changed(GtkRange *range, gpointer data)
 {
     (void)data;
     audio_set_target_ms(gtk_range_get_value(range));
+    settings_save();
 }
 
 static gboolean on_listen_toggled(GtkSwitch *sw, gboolean state, gpointer data)
@@ -423,7 +471,7 @@ static void build_window(GtkApplication *app)
     gtk_box_append(GTK_BOX(sbox), UI.scale);
     gtk_box_append(GTK_BOX(vbox), sbox);
 
-    GtkWidget *rr = gtk_check_button_new_with_label("Rate matching on the phone (this PC never resamples; what a microcontroller receiver would do)");
+    GtkWidget *rr = gtk_check_button_new_with_label("Rate matching on the phone (this PC never resamples; lossless with a rooted phone, what a microcontroller receiver would do)");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(rr), opt.remote_rate);
     g_signal_connect(rr, "toggled", G_CALLBACK(on_remote_rate_toggled), NULL);
     gtk_box_append(GTK_BOX(vbox), rr);
@@ -509,6 +557,8 @@ static int on_handle_local_options(GApplication *app, GVariantDict *dict, gpoint
         fprintf(stderr, "cannot start PipeWire\n");
         return 1;
     }
+    if (opt.local_rate)
+        opt.remote_rate = FALSE;
     audio_set_target_ms(opt.buffer_ms);
     audio_set_remote_rate(opt.remote_rate);
     return -1;   /* continue */
@@ -516,6 +566,7 @@ static int on_handle_local_options(GApplication *app, GVariantDict *dict, gpoint
 
 int main(int argc, char **argv)
 {
+    settings_load();     /* saved slider / check-box values; command-line options override */
     GtkApplication *app = gtk_application_new("io.github.hifistream.Receiver", G_APPLICATION_NON_UNIQUE);
     g_application_add_main_option_entries(G_APPLICATION(app), entries);
     g_application_set_option_context_summary(G_APPLICATION(app),

@@ -58,14 +58,16 @@ writes exactly what arrives, which is how the numbers below were verified.
   5–10 s instead of trimming straight back to the margin, so a hole that
   repeats every few seconds only costs one dropout, not one per repeat. The
   default margin is 20 ms; on a congested AP with 50–100 ms holes raise it.
+  The slider and the rate-matching check box are remembered in
+  `~/.config/hifistream/receiver.conf`; command-line options override them.
 * Clock drift between phone and DAC, and any drift in the arrival timing, is
   absorbed by steering PipeWire's resampler rate a few hundred ppm through a
   DLL (the mechanism PipeWire's own RTP receiver uses), so in steady state
   nothing is ever spliced. 64-frame crossfaded drops/inserts remain only for
   gross errors (> 20 ms), rate-limited to a 0.5 % tempo change.
-* **Rate matching on the phone** (`--remote-rate`, or the check box): the
-  receiver never resamples and instead sends the correction it wants in its
-  once-a-second report. This is the mode for a microcontroller receiver,
+* **Rate matching on the phone** (the default; `--local-rate` or the check
+  box for PipeWire's resampler instead): the receiver never resamples and
+  instead sends the correction it wants in its once-a-second report. This is the mode for a microcontroller receiver,
   which only has to run the slow fill loop and send one number — see
   PROTOCOL.md, "Receiver report". The phone applies it in one of two ways:
   * **Clock trim — lossless** (system mode, root, default): the phone trims
