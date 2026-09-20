@@ -304,8 +304,12 @@ static void settings_save(void)
     g_key_file_set_double(kf, "receiver", "buffer_ms", audio_get_target_ms());
     g_key_file_set_boolean(kf, "receiver", "remote_rate", audio_get_remote_rate());
     g_key_file_set_integer(kf, "receiver", "port", opt.port);
+    /* The target sink is kept only if the file already had one or --target was
+     * given; without it the stream follows the desktop's default output. */
     if (opt.target)
         g_key_file_set_string(kf, "receiver", "target", opt.target);
+    else
+        g_key_file_remove_key(kf, "receiver", "target", NULL);
     g_key_file_save_to_file(kf, path, NULL);
     g_key_file_free(kf);
     g_free(dir);
