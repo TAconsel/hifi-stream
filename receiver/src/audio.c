@@ -516,7 +516,12 @@ int audio_configure(const struct audio_config *cfg)
         PW_KEY_NODE_NAME, "hifistream-receiver",
         PW_KEY_NODE_DESCRIPTION, "HiFi Stream (Wi-Fi from phone)",
         NULL);
-    pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d", A.opts.quantum, cfg->rate);
+    /* The requested quantum is meant for <= 96 kHz; keep the cycle time, not
+     * the frame count, at higher rates (256 @ 192 kHz would be 1.3 ms). */
+    int quantum = A.opts.quantum;
+    if (cfg->rate > 96000)
+        quantum *= (cfg->rate + 96000 - 1) / 96000;
+    pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d", quantum, cfg->rate);
     pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%d", cfg->rate);
     pw_properties_set(props, PW_KEY_NODE_LOCK_RATE, "true");
     if (A.opts.force_rate)

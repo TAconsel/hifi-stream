@@ -43,7 +43,7 @@ writes exactly what arrives, which is how the numbers below were verified.
 
 * Raw PCM over UDP, ~5 ms per packet, no codec – nothing to decode.
 * PipeWire stream with a 256-frame quantum (5.3 ms at 48 kHz) that asks the
-  graph to run at the stream's rate, so 44.1/48/96 kHz all play bit-exact.
+  graph to run at the stream's rate, so 44.1/48/96/192 kHz all play bit-exact.
 * Jitter buffer regulated on the **minimum** fill over the last second: the
   *safety margin* slider says how much audio must always be buffered; the
   actual latency adapts to the measured jitter on top of that.
@@ -140,6 +140,12 @@ DSCP EF on the socket (Wi-Fi WMM voice queue), partial wake lock.
   audio late or the sender thread overslept, so a dropout can be attributed.
 * 96 kHz / 24-bit (4.7 Mbit/s) streams just as well; PipeWire switched the
   graph to 96 kHz.
+* 192 kHz / 32-bit float (12.5 Mbit/s, 1070 packets/s) with the patched HAL:
+  AudioFlinger runs the submix at 192 kHz (its maximum), the stream is
+  regulated the same way (0 lost, jitter 0.5 ms, buffer ≈ 30 ms over a
+  3-minute run). The PipeWire quantum scales with the rate (512 frames at
+  192 kHz, still 2.7 ms). Whether the *graph* follows depends on the DAC's
+  supported rates — a 48/96 kHz card makes PipeWire resample on the way out.
 
 ### Honest limits of "high resolution"
 

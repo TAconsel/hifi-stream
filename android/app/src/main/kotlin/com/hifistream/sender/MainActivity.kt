@@ -448,7 +448,7 @@ private fun DeviceSettingsScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Audio", style = MaterialTheme.typography.titleMedium)
                     Text("Sample rate", style = MaterialTheme.typography.labelMedium)
-                    val rates = listOf(44100, 48000, 96000)
+                    val rates = listOf(44100, 48000, 96000, 192000)
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                         rates.forEachIndexed { i, r ->
                             SegmentedButton(selected = device.rate == r, onClick = { onChange(device.copy(rate = r)) },
@@ -605,7 +605,7 @@ private fun AppSettingsScreen(onBack: () -> Unit) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Hi-res capture", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                if (halPatched == true) "Remote-submix HAL patched: the loop-back pipe runs in 32-bit float at the selected sample rate (44.1 / 48 / 96 kHz)."
+                                if (halPatched == true) "Remote-submix HAL patched: the loop-back pipe runs in 32-bit float at the selected sample rate (44.1 / 48 / 96 / 192 kHz)."
                                 else "Android's remote-submix HAL forces the loop-back pipe to 16-bit / 48 kHz. The patch changes two constants in a copy of that library (float instead of 16-bit, keep the requested rate); the copy lives in the Magisk module, the original is untouched.",
                                 style = MaterialTheme.typography.bodySmall
                             )
