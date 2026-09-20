@@ -21,13 +21,15 @@ object LinkHealth {
     @Volatile var lost = 0L; private set
     @Volatile var recovered = 0L; private set
     @Volatile var underruns = 0L; private set
+    /** Rate correction the receiver asks us to apply, ppm (0 = it resamples itself). */
+    @Volatile var ratePpm = 0.0; private set
     @Volatile private var lastReportMs = 0L
     @Volatile private var lastLostMs = 0L
     @Volatile private var lastRecoveredMs = 0L
     @Volatile private var lastUnderrunMs = 0L
 
     fun reset() {
-        jitterMs = 0.0; bufferMs = 0.0; lost = 0; recovered = 0; underruns = 0
+        jitterMs = 0.0; bufferMs = 0.0; lost = 0; recovered = 0; underruns = 0; ratePpm = 0.0
         lastReportMs = 0; lastLostMs = 0; lastRecoveredMs = 0; lastUnderrunMs = 0
     }
 
@@ -42,6 +44,7 @@ object LinkHealth {
             if (r > recovered) lastRecoveredMs = now
             if (u > underruns) lastUnderrunMs = now
             jitterMs = j; lost = l; recovered = r; underruns = u; bufferMs = b
+            ratePpm = if (f.size >= 7) f[6].toDoubleOrNull() ?: 0.0 else 0.0
             lastReportMs = now
         } catch (_: NumberFormatException) {
         }
@@ -62,5 +65,6 @@ object LinkHealth {
     }
 
     fun summary(): String = if (!reporting) "no report from receiver" else
-        "PC: jitter %.1f ms · buffer %.0f ms · %d lost · %d recovered · %d dropouts".format(jitterMs, bufferMs, lost, recovered, underruns)
+        "PC: jitter %.1f ms · buffer %.0f ms · %d lost · %d recovered · %d dropouts".format(jitterMs, bufferMs, lost, recovered, underruns) +
+            (if (ratePpm != 0.0) " · rate %+.0f ppm on phone".format(ratePpm) else "")
 }

@@ -15,6 +15,7 @@ static struct {
     int      quantum;
     gboolean headless;
     gboolean force_rate;
+    gboolean remote_rate;
     char    *dump;
     char    *target;
     int      log_secs;
@@ -26,6 +27,7 @@ static const GOptionEntry entries[] = {
     { "quantum",    'q', 0, G_OPTION_ARG_INT,    &opt.quantum,    "Requested PipeWire quantum in frames (default 256)", "FRAMES" },
     { "target",     't', 0, G_OPTION_ARG_STRING, &opt.target,     "PipeWire sink to play to (node name or id)", "NODE" },
     { "force-rate", 0,   0, G_OPTION_ARG_NONE,   &opt.force_rate, "Force the PipeWire graph rate to follow the stream", NULL },
+    { "remote-rate", 0,  0, G_OPTION_ARG_NONE,   &opt.remote_rate, "Rate matching on the phone: never resample here, send the correction in HFS_RX", NULL },
     { "dump",       'd', 0, G_OPTION_ARG_STRING, &opt.dump,       "Also write the received audio to a float WAV file", "FILE" },
     { "headless",   0,   0, G_OPTION_ARG_NONE,   &opt.headless,   "No window; print statistics to stdout", NULL },
     { "log",        'l', 0, G_OPTION_ARG_INT,    &opt.log_secs,   "Also print a statistics line to stderr every N seconds", "N" },
@@ -231,10 +233,11 @@ static gboolean refresh(gpointer data)
 
     if (a.state != AUDIO_IDLE && a.cfg.rate) {
         double q_ms = a.quantum ? 1000.0 * a.quantum / a.cfg.rate : 0;
-        snprintf(buf, sizeof(buf), "PipeWire %s · graph %d Hz%s · quantum %d (%.1f ms) · device delay %.1f ms · rate ×%.5f (%+.0f ppm)",
+        snprintf(buf, sizeof(buf), "PipeWire %s · graph %d Hz%s · quantum %d (%.1f ms) · device delay %.1f ms · rate ×%.5f (%+.0f ppm%s)",
                  state_name(a.state), a.graph_rate,
                  a.graph_rate && a.graph_rate != a.cfg.rate ? " (resampling!)" : "",
-                 a.quantum, q_ms, a.device_delay_ms, a.rate_corr, (a.rate_corr - 1.0) * 1e6);
+                 a.quantum, q_ms, a.device_delay_ms, a.rate_corr, (a.rate_corr - 1.0) * 1e6,
+                 a.remote_rate ? ", applied on the phone" : "");
         gtk_label_set_text(GTK_LABEL(UI.output), buf);
         double pkt_ms = n.cfg.rate ? 1000.0 * n.frames_per_packet / n.cfg.rate : 0;
         snprintf(buf, sizeof(buf), "≈ %.0f ms on this PC (buffer + device) + %.0f ms packetisation + Wi-Fi + phone capture & pacing (~25 ms)",
@@ -256,6 +259,12 @@ static gboolean refresh(gpointer data)
         gtk_widget_set_tooltip_text(UI.dump_button, NULL);
     }
     return G_SOURCE_CONTINUE;
+}
+
+static void on_remote_rate_toggled(GtkCheckButton *b, gpointer data)
+{
+    (void)data;
+    audio_set_remote_rate(gtk_check_button_get_active(b));
 }
 
 static void on_scale_changed(GtkRange *range, gpointer data)
@@ -414,6 +423,11 @@ static void build_window(GtkApplication *app)
     gtk_box_append(GTK_BOX(sbox), UI.scale);
     gtk_box_append(GTK_BOX(vbox), sbox);
 
+    GtkWidget *rr = gtk_check_button_new_with_label("Rate matching on the phone (this PC never resamples; what a microcontroller receiver would do)");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(rr), opt.remote_rate);
+    g_signal_connect(rr, "toggled", G_CALLBACK(on_remote_rate_toggled), NULL);
+    gtk_box_append(GTK_BOX(vbox), rr);
+
     GtkWidget *hint = gtk_label_new("Phone: HiFi Stream app → set this PC's address (or tap Discover) → Start. "
                                     "Turn the phone's media volume to 0 to hear only the PC.");
     gtk_widget_add_css_class(hint, "dim-label");
@@ -496,6 +510,7 @@ static int on_handle_local_options(GApplication *app, GVariantDict *dict, gpoint
         return 1;
     }
     audio_set_target_ms(opt.buffer_ms);
+    audio_set_remote_rate(opt.remote_rate);
     return -1;   /* continue */
 }
 

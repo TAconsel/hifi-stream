@@ -29,7 +29,8 @@ struct audio_stats {
     int quantum;            /* frames per PipeWire process cycle */
     int graph_rate;         /* PipeWire graph rate; equals cfg.rate when bit-exact */
     double device_delay_ms; /* delay reported by PipeWire between the stream and the DAC */
-    double rate_corr;       /* resampler rate correction, 1.0 = none; see audio.c */
+    double rate_corr;       /* rate correction the fill loop asks for, 1.0 = none; see audio.c */
+    bool   remote_rate;     /* true: the correction is sent to the phone instead of resampling here */
     uint64_t underruns;
     uint64_t overflows;
     uint64_t drops;         /* crossfaded frame drops (buffer running long) */
@@ -46,6 +47,12 @@ struct audio_options {
 };
 
 int  audio_init(const struct audio_options *opts);
+/* Rate matching on the phone: the fill loop's correction is reported to the
+ * sender (HFS_RX) and applied there; this receiver never resamples. Meant
+ * for receivers without the CPU for a resampler (microcontrollers); the PC
+ * receiver offers it for testing that path. */
+void audio_set_remote_rate(bool on);
+bool audio_get_remote_rate(void);
 void audio_shutdown(void);
 
 /* (Re)creates the output stream. Safe to call from the network thread. */

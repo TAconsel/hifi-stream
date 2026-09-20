@@ -71,6 +71,7 @@ struct audio {
     _Atomic uint64_t rate_corr_bits;
     struct spa_source *rate_timer;
     double  rate_applied;
+    _Atomic bool remote_rate;   /* send the correction to the phone instead of applying it */
     float  *scratch;            /* quantum + XFADE_MAX frames */
     size_t  scratch_frames;
 };
@@ -564,6 +565,8 @@ static void on_rate_timer(void *data, uint64_t expirations)
         return;
     uint64_t bits = atomic_load(&A.rate_corr_bits);
     double corr; memcpy(&corr, &bits, sizeof(corr));
+    if (atomic_load(&A.remote_rate))
+        corr = 1.0;             /* the phone applies it; this side stays bit-exact */
     if (!bits || fabs(corr - A.rate_applied) < 1e-7)
         return;
     float f = (float)corr;
@@ -589,6 +592,16 @@ void audio_set_phone_volume(double frac)
     A.phone_volume = frac;
     apply_volume_locked();
     pw_thread_loop_unlock(A.loop);
+}
+
+void audio_set_remote_rate(bool on)
+{
+    atomic_store(&A.remote_rate, on);
+}
+
+bool audio_get_remote_rate(void)
+{
+    return atomic_load(&A.remote_rate);
 }
 
 void audio_set_target_ms(double ms)
@@ -619,6 +632,7 @@ void audio_get_stats(struct audio_stats *s)
     s->overflows = atomic_load(&A.overflows);
     s->drops = atomic_load(&A.drops);
     { uint64_t bits = atomic_load(&A.rate_corr_bits); double v; memcpy(&v, &bits, sizeof(v)); s->rate_corr = bits ? v : 1.0; }
+    s->remote_rate = atomic_load(&A.remote_rate);
     s->inserts = atomic_load(&A.inserts);
     s->resyncs = atomic_load(&A.resyncs);
     s->phone_volume = A.phone_volume;

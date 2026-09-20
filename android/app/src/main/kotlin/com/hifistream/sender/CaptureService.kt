@@ -363,13 +363,21 @@ class CaptureService : Service() {
         val buf = ByteBuffer.allocate(StreamProtocol.HEADER_SIZE + samples.size * format.bytesPerSample)
             .order(ByteOrder.LITTLE_ENDIAN)
         val packet = DatagramPacket(buf.array(), 0, address, port)
+        // Rate matching on request of the receiver (HFS_RX rate_ppm): captured audio is
+        // resampled here so a receiver without a resampler still stays in sync. Output
+        // frames are collected in a small FIFO and packetised from there.
+        val vari = Varispeed(CHANNELS)
+        val vout = FloatArray(samples.size * 3)
+        val fifo = FloatArray(samples.size * 8)
+        var fifoLen = 0
+        var inputPos = 0L          // captured frames consumed so far
+        var packetInputPos = 0L    // capture position the current packet's audio came from
         // Every packet sent is kept for a while so the receiver can ask for it again
         // (HFS_NACK) when it notices a gap: a resend usually lands well inside its
         // jitter buffer, which is how a lost packet becomes silence-free.
         val history = PacketHistory(StreamProtocol.HISTORY, buf.capacity())
         val nackThread = Thread({ nackLoop(socket, history, address, port) }, "hfs-nack").also { it.start() }
         var seq = 0
-        var framePos = 0L          // audio position of the next frame to send
         var packets = 0L
         var bytes = 0L
         var sendErrors = 0L
@@ -380,14 +388,31 @@ class CaptureService : Service() {
             var lastVolMs = 0L
             var groupSendUs = 0L
             while (running) {
-                if (!ring.take(samples, samples.size, 200)) continue
+                // Fill the output FIFO with one packet's worth, resampling if asked to.
+                while (fifoLen < samples.size) {
+                    if (!ring.take(samples, samples.size, 200)) break
+                    if (fifoLen == 0) packetInputPos = inputPos
+                    vari.request(LinkHealth.ratePpm)
+                    val n = if (vari.active) vari.process(samples, samples.size, vout) else {
+                        System.arraycopy(samples, 0, vout, 0, samples.size); samples.size
+                    }
+                    inputPos += framesPerPacket
+                    if (fifoLen + n > fifo.size) { fifoLen = 0; sendErrors++ }   // cannot happen at sane ratios
+                    System.arraycopy(vout, 0, fifo, fifoLen, n)
+                    fifoLen += n
+                }
+                if (fifoLen < samples.size) { if (!running) break else continue }
+                System.arraycopy(fifo, 0, samples, 0, samples.size)
+                System.arraycopy(fifo, samples.size, fifo, 0, fifoLen - samples.size)
+                fifoLen -= samples.size
                 // Packets leave in small groups: one frame per TXOP would cost the Wi-Fi
                 // driver its A-MPDU aggregation and congest the air, one burst per HAL
                 // period is what the pacing exists to avoid.
                 if (seq % paceGroup == 0) {
-                    clock.waitUntilDue(framePos)
+                    clock.waitUntilDue(packetInputPos)
                     groupSendUs = SystemClock.elapsedRealtimeNanos() / 1000
                 }
+                packetInputPos = inputPos
                 // The wire timestamp is the departure time (shared by a group), so the
                 // receiver's jitter figure measures the network and nothing else.
                 buf.clear()
@@ -400,7 +425,6 @@ class CaptureService : Service() {
                     sendErrors++
                 }
                 history.put(seq, buf.array(), buf.position())
-                framePos += framesPerPacket
                 seq++
                 packets++
                 bytes += buf.position()

@@ -63,6 +63,12 @@ writes exactly what arrives, which is how the numbers below were verified.
   DLL (the mechanism PipeWire's own RTP receiver uses), so in steady state
   nothing is ever spliced. 64-frame crossfaded drops/inserts remain only for
   gross errors (> 20 ms), rate-limited to a 0.5 % tempo change.
+* **Rate matching on the phone** (`--remote-rate`, or the check box): the
+  receiver never resamples and instead sends the correction it wants in its
+  once-a-second report; the phone resamples its capture with a 32-tap
+  windowed-sinc (worst spur −110 dB, noise floor at the numerical bottom).
+  This is the mode for a microcontroller receiver, which only has to run the
+  slow fill loop and send one number — see PROTOCOL.md, "Receiver report".
 * Lost packets become silence of the right length so timing is preserved, and
   are requested again from the phone at once (NACK, see PROTOCOL.md); a resend
   that lands before the spot is played replaces the silence. With 2 % random

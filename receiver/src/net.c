@@ -371,9 +371,12 @@ static void handle_audio(const uint8_t *pkt, unsigned len, const struct sockaddr
         struct audio_stats a;
         audio_get_stats(&a);
         char msg[128];
-        int m = snprintf(msg, sizeof(msg), "%s %.2f %" PRIu64 " %" PRIu64 " %" PRIu64 " %.1f", HFS_REPORT_MSG,
+        /* rate_ppm: the correction this receiver asks the phone to apply (0 when
+         * it resamples locally); positive = the buffer runs long, send fewer frames. */
+        double ppm = a.remote_rate ? (a.rate_corr - 1.0) * 1e6 : 0.0;
+        int m = snprintf(msg, sizeof(msg), "%s %.2f %" PRIu64 " %" PRIu64 " %" PRIu64 " %.1f %.0f", HFS_REPORT_MSG,
                          N.st.jitter_ms, N.st.lost, N.st.recovered, a.underruns,
-                         a.cfg.rate ? 1000.0 * a.fill_frames / a.cfg.rate : 0.0);
+                         a.cfg.rate ? 1000.0 * a.fill_frames / a.cfg.rate : 0.0, ppm);
         sendto(N.sock, msg, (size_t)m, MSG_DONTWAIT, (const struct sockaddr *)&N.peer, sizeof(N.peer));
     }
     pthread_mutex_unlock(&N.lock);
